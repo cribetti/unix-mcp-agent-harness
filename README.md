@@ -45,11 +45,11 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 
-# Run the default multi-threaded C ring-buffer benchmark
+# Run the default multi-threaded Kotlin rate-limiter benchmark
 python3 orchestrator.py
 
-# Or pass any custom systems task
-python3 orchestrator.py "Implement a thread-safe LRU cache in C with unit tests"
+# Or pass any custom C or Kotlin systems task
+python3 orchestrator.py "Create ringbuf.h and ringbuf.c implementing a thread-safe bounded ring buffer using pthread_mutex_t and pthread_cond_t. Create test_ringbuf.c verifying total items and sum checksum."
 ```
 
 ## Hardware & Memory Telemetry (Apple Silicon)

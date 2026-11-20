@@ -8,10 +8,11 @@ import time
 from types import SimpleNamespace
 from openai import OpenAI
 
+
 DEFAULT_SPEC = (
-    "Create `ringbuf.h` and `ringbuf.c` implementing a thread-safe bounded ring buffer "
-    "using pthread_mutex_t and pthread_cond_t. Create `test_ringbuf.c` with 4 producer "
-    "and 4 consumer threads verifying total items and sum checksum."
+    "Create `RateLimiter.kt` and `Main.kt` implementing a thread-safe token-bucket rate limiter "
+    "in Kotlin using `ReentrantLock`. In `Main.kt`, write multi-threaded assertions (using `assert()`) "
+    "verifying burst capacity, refill timing, and concurrent access across 8 threads."
 )
 
 
