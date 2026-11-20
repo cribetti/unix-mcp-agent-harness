@@ -66,9 +66,13 @@ def call_tool(name: str, args: dict) -> str:
         return "".join(lines)[:6000]
 
     if name == "compile_and_test":
-        cmd = "gcc -O2 -g -Wall -pthread *.c -o test_app && ./test_app"
+        has_kt = any(f.endswith(".kt") for f in os.listdir(WORKSPACE))
+        if has_kt:
+            cmd = "kotlinc *.kt -include-runtime -d test_app.jar && java -ea -jar test_app.jar"
+        else:
+            cmd = "gcc -O2 -g -Wall -pthread *.c -o test_app && ./test_app"
         res = subprocess.run(
-            ["bash", "-c", cmd], cwd=WORKSPACE, capture_output=True, text=True, timeout=15
+            ["bash", "-c", cmd], cwd=WORKSPACE, capture_output=True, text=True, timeout=30
         )
         return f"EXIT_CODE: {res.returncode}\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}"[:6000]
 
