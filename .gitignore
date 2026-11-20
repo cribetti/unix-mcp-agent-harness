@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+*.pyc
+workspace/
+saved_*/
+.DS_Store
