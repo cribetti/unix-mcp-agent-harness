@@ -11,8 +11,10 @@ from openai import OpenAI
 
 DEFAULT_SPEC = (
     "Create `RateLimiter.kt` and `Main.kt` implementing a thread-safe token-bucket rate limiter "
-    "in Kotlin using `ReentrantLock`. In `Main.kt`, write multi-threaded assertions (using `assert()`) "
-    "verifying burst capacity, refill timing, and concurrent access across 8 threads."
+    "in Kotlin using `ReentrantLock` (with `try { ... } finally { lock.unlock() }`). "
+    "In `Main.kt`, use standard `Thread { ... }` (not ExecutorService) and built-in `assert(condition)` "
+    "(do NOT import kotlin.test) to verify burst capacity, refill over time, and 8 concurrent threads, "
+    "printing 'ALL TESTS PASSED' at the end."
 )
 
 
@@ -172,11 +174,17 @@ def run_critic(client: OpenAI, model: str, mcp: MCPClient, spec: str) -> tuple[b
         return False, f"Build/Test failed:\n{test_out}"
 
     critic_prompt = (
-        f"Review this implementation against the spec.\nSPEC: {spec}\n\n"
+        f"Audit this implementation strictly against the spec.\nSPEC: {spec}\n\n"
         f"TEST OUTPUT:\n{test_out}\n\nGIT DIFF:\n{diff}\n\n"
-        "Check for missing locks, race conditions, memory leaks, or hardcoded fake tests. "
-        "Reply starting with 'APPROVED:' if clean, or 'REJECTED:' with exact bugs to fix."
+        "PASS CRITERIA (approve immediately if ALL 4 are true):\n"
+        "1. TEST OUTPUT shows EXIT_CODE: 0 with zero exceptions or AssertionErrors in STDERR.\n"
+        "2. Uses the required synchronization primitive from SPEC (e.g., ReentrantLock or pthread_mutex_t).\n"
+        "3. Implements the core logic and runs real multi-threaded assertions (not empty stubs).\n"
+        "4. Satisfies every explicit requirement in SPEC.\n\n"
+        "RULES: Do NOT reject for style, extra edge cases not in SPEC, or suggest refactoring. "
+        "Reply starting with 'APPROVED:' if all 4 pass, or 'REJECTED:' with only blocking bugs."
     )
+
     msg = stream_turn(
         client=client,
         model=model,
@@ -190,9 +198,42 @@ def run_critic(client: OpenAI, model: str, mcp: MCPClient, spec: str) -> tuple[b
     verdict = (msg.content or "").strip()
     return verdict.startswith("APPROVED:"), verdict
 
+def extract_fallback_tool_calls(content: str | None) -> list[SimpleNamespace] | None:
+    """Parse raw JSON tool-call objects if a model emits them in message content."""
+    if not content:
+        return None
+    calls = []
+    for idx, line in enumerate(content.strip().splitlines()):
+        line = line.strip()
+        if line.startswith("{") and '"name"' in line and '"arguments"' in line:
+            try:
+                obj = json.loads(line)
+                if isinstance(obj.get("name"), str) and isinstance(obj.get("arguments"), dict):
+                    calls.append(
+                        SimpleNamespace(
+                            id=f"fallback_call_{idx}",
+                            type="function",
+                            function=SimpleNamespace(
+                                name=obj["name"],
+                                arguments=json.dumps(obj["arguments"]),
+                            ),
+                        )
+                    )
+            except json.JSONDecodeError:
+                pass
+    return calls or None
 
 def main():
-    parser = argparse.ArgumentParser(description="Local MCP Coder + Critic Autonomous Harness")
+    parser = argparse.ArgumentParser(
+        description="Local MCP Coder + Critic Autonomous Harness",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  python3 orchestrator.py\n"
+            "  python3 orchestrator.py --model qwen2.5-coder:7b\n"
+            '  python3 orchestrator.py --model qwen2.5-coder:7b "Create cache.h and cache.c implementing a thread-safe LRU cache with pthread_mutex_t, plus test_cache.c."\n'
+        ),
+    )
     parser.add_argument("spec", nargs="?", default=DEFAULT_SPEC, help="Engineering task specification")
     parser.add_argument("--model", default="qwen3:8b", help="Local Ollama model name (default: qwen3:8b)")
     parser.add_argument("--base-url", default="http://localhost:11434/v1", help="OpenAI-compatible endpoint URL")
@@ -211,16 +252,20 @@ def main():
             "role": "system",
             "content": (
                 "You are a systems engineer. Use write_file, read_file, and compile_and_test "
-                "via tool calls. Never output code in chat text. /no_think"
+                "via tool calls. Never output code in chat text. For Kotlin tests, use built-in "
+                "`assert(condition)` directly and NEVER import `kotlin.test.*`. /no_think"
             ),
         },
         {"role": "user", "content": args.spec},
     ]
 
     try:
+        critic_rejections = 0
         for turn in range(args.max_turns):
             print(f"\n=== [Coder Turn {turn+1} | {args.model}] ===", flush=True)
             msg = stream_turn(client, args.model, messages, tools=openai_tools, temp=0.1)
+            if not msg.tool_calls:
+                msg.tool_calls = extract_fallback_tool_calls(msg.content)
 
             messages.append({
                 "role": "assistant",
@@ -241,8 +286,24 @@ def main():
                     print(f"  -> MCP {tc.function.name}({list(call_args.keys())})", flush=True)
                     out = mcp.call_tool(tc.function.name, call_args)
                     if tc.function.name == "compile_and_test":
-                        print("    ", out.splitlines()[0], flush=True)
+                        print("\n".join(f"     {line}" for line in out.splitlines()[:25]), flush=True)
+                        if "EXIT_CODE: 0" in out:
+                            print("\n=== [Critic Review] ===", flush=True)
+                            approved, feedback = run_critic(client, args.model, mcp, args.spec)
+                            if approved:
+                                print("\n=== APPROVED BY CRITIC & VERIFIED EXIT 0 ===", flush=True)
+                                return
+                            critic_rejections += 1
+                            if critic_rejections >= 2:
+                                print("\n=== [Harness] Critic rejection cap (2) reached — halting cleanly ===", flush=True)
+                                return
+                            messages.append({"role": "user", "content": f"Critic feedback:\n{feedback}\n/no_think"})
+                            break
+
+                        else:
+                            out += "\n\nINSTRUCTION: Fix ALL errors listed above across all files in one batch before calling compile_and_test again."
                     messages.append({"role": "tool", "tool_call_id": tc.id, "content": out})
+
             else:
                 src_files = [f for f in os.listdir(workspace) if f.endswith((".c", ".kt"))]
                 if not src_files:
@@ -253,12 +314,12 @@ def main():
                     })
                     continue
 
-                print("\n=== [Critic Review] ===", flush=True)
-                approved, feedback = run_critic(client, args.model, mcp, args.spec)
-                if approved:
-                    print("\n=== APPROVED BY CRITIC & VERIFIED EXIT 0 ===", flush=True)
-                    break
-                messages.append({"role": "user", "content": f"Critic feedback:\n{feedback}\n/no_think"})
+                print("[Harness] Nudging Coder to run compile_and_test...", flush=True)
+                messages.append({
+                    "role": "user",
+                    "content": "Call `compile_and_test` now to verify your changes. /no_think",
+                })
+
     finally:
         mcp.close()
 

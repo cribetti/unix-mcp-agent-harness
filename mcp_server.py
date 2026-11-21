@@ -53,9 +53,13 @@ TOOLS = [
 def call_tool(name: str, args: dict) -> str:
     if name == "write_file":
         p = safe_path(args["path"])
-        with open(p, "w", encoding="utf-8") as f:
-            f.write(args["content"])
-        return f"OK: wrote {len(args['content'])} bytes to {args['path']}"
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        content = args["content"]
+        if p.endswith(".kt"):
+            content = "\n".join(l for l in content.splitlines() if not l.strip().startswith("import kotlin.test.")) + "\n"
+        with open(p, "w") as f:
+            f.write(content)
+        return f"Wrote {len(content)} bytes to {args['path']}"
 
     if name == "read_file":
         p = safe_path(args["path"])
@@ -68,7 +72,13 @@ def call_tool(name: str, args: dict) -> str:
     if name == "compile_and_test":
         has_kt = any(f.endswith(".kt") for f in os.listdir(WORKSPACE))
         if has_kt:
-            cmd = "kotlinc *.kt -include-runtime -d test_app.jar && java -ea -jar test_app.jar"
+            cmd = (
+                'KLIB=$(dirname "$(realpath "$(which kotlinc)")")/../libexec/lib; '
+                'CP=$(ls "$KLIB"/kotlin-test*.jar 2>/dev/null | tr "\\n" ":"); '
+                'kotlinc -cp "$CP" *.kt -include-runtime -d test_app.jar && '
+                'java -ea -cp "test_app.jar:$CP" MainKt'
+            )
+
         else:
             cmd = "gcc -O2 -g -Wall -pthread *.c -o test_app && ./test_app"
         res = subprocess.run(
@@ -77,13 +87,9 @@ def call_tool(name: str, args: dict) -> str:
         return f"EXIT_CODE: {res.returncode}\nSTDOUT:\n{res.stdout}\nSTDERR:\n{res.stderr}"[:6000]
 
     if name == "git_diff":
-        res = subprocess.run(
-            ["bash", "-c", "git status -s && git diff"],
-            cwd=WORKSPACE,
-            capture_output=True,
-            text=True,
-        )
-        return (res.stdout or "(no diff)")[:6000]
+        subprocess.run(["git", "add", "-N", "*.kt", "*.c", "*.h"], cwd=WORKSPACE, capture_output=True)
+        res = subprocess.run(["git", "diff", "HEAD", "--", "*.kt", "*.c", "*.h"], cwd=WORKSPACE, capture_output=True, text=True)
+        return res.stdout[:8000] or "No changes."
 
     raise ValueError(f"Unknown tool: {name}")
 
