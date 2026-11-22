@@ -5,6 +5,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from openai import OpenAI
 
@@ -235,6 +236,37 @@ def run_critic(
     verdict = (msg.content or "").strip()
     return verdict.startswith("APPROVED:"), verdict
 
+
+def log_trajectory(
+    log_path: str,
+    *,
+    model: str,
+    workspace: str,
+    spec: str,
+    messages: list[dict],
+    git_diff: str,
+    critic_verdict: str,
+    turns: int,
+    critic_rejections: int,
+) -> None:
+    """Append a Critic-approved, EXIT_CODE: 0 trajectory record for RLVR / MLX LoRA fine-tuning."""
+    record = {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "model": model,
+        "workspace": workspace,
+        "spec": spec,
+        "turns": turns,
+        "critic_rejections": critic_rejections,
+        "critic_verdict": critic_verdict,
+        "git_diff": git_diff,
+        "messages": messages,
+    }
+    parent = os.path.dirname(os.path.abspath(log_path))
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    with open(log_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
 def extract_fallback_tool_calls(content: str | None) -> list[SimpleNamespace] | None:
     """Parse raw JSON tool-call objects if a model emits them in message content."""
     if not content:
@@ -282,6 +314,11 @@ def main():
     parser.add_argument("--model", default="qwen3:8b", help="Local Ollama model name (default: qwen3:8b)")
     parser.add_argument("--base-url", default="http://localhost:11434/v1", help="OpenAI-compatible endpoint URL")
     parser.add_argument("--max-turns", type=int, default=12, help="Maximum Coder turns before aborting")
+    parser.add_argument(
+        "--trajectories",
+        default=os.path.join(os.path.dirname(os.path.abspath(__file__)), "trajectories.jsonl"),
+        help="Path to JSONL file for logging Critic-approved RLVR trajectories",
+    )
     args = parser.parse_args()
 
     spec = resolve_task_spec(args.task, args.spec)
@@ -359,6 +396,19 @@ def main():
                                 client, args.model, mcp, spec, agents_md=agents_md
                             )
                             if approved:
+                                diff = mcp.call_tool("git_diff", {})
+                                log_trajectory(
+                                    args.trajectories,
+                                    model=args.model,
+                                    workspace=workspace,
+                                    spec=spec,
+                                    messages=messages,
+                                    git_diff=diff,
+                                    critic_verdict=feedback,
+                                    turns=turn + 1,
+                                    critic_rejections=critic_rejections,
+                                )
+                                print(f"[Harness] Logged verified trajectory to {args.trajectories}", flush=True)
                                 print("\n=== APPROVED BY CRITIC & VERIFIED EXIT 0 ===", flush=True)
                                 return
                             critic_rejections += 1

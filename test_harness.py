@@ -108,6 +108,39 @@ class TestHarness(unittest.TestCase):
             self.assertEqual(orchestrator.resolve_task_spec(None, "pos spec"), "pos spec")
             self.assertEqual(orchestrator.resolve_task_spec(None, None), orchestrator.DEFAULT_SPEC)
 
+    def test_log_trajectory_jsonl(self):
+        with tempfile.TemporaryDirectory() as td:
+            log_path = os.path.join(td, "nested", "trajectories.jsonl")
+            orchestrator.log_trajectory(
+                log_path,
+                model="qwen2.5-coder:7b",
+                workspace=td,
+                spec="Test spec",
+                messages=[{"role": "user", "content": "Test spec"}],
+                git_diff="diff --git a/a.kt b/a.kt",
+                critic_verdict="APPROVED: looks good",
+                turns=2,
+                critic_rejections=0,
+            )
+            orchestrator.log_trajectory(
+                log_path,
+                model="qwen3:8b",
+                workspace=td,
+                spec="Test spec 2",
+                messages=[{"role": "user", "content": "Test spec 2"}],
+                git_diff="diff --git a/b.kt b/b.kt",
+                critic_verdict="APPROVED: ok",
+                turns=3,
+                critic_rejections=1,
+            )
+            with open(log_path, "r", encoding="utf-8") as f:
+                rows = [json.loads(line) for line in f.read().splitlines()]
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(rows[0]["model"], "qwen2.5-coder:7b")
+            self.assertEqual(rows[0]["turns"], 2)
+            self.assertIn("timestamp", rows[0])
+            self.assertEqual(rows[1]["critic_rejections"], 1)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -5,3 +5,4 @@ workspace/
 saved_*/
 .DS_Store
 my-notes/
+trajectories.jsonl
