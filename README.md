@@ -20,12 +20,15 @@ Most AI agent demos hand an LLM unrestricted `bash` access and trust the model's
 │             │  JSON-RPC 2.0 over stdin/stdout │                │
 │             ▼                                 ▼                │
 │  ┌──────────────────────────────────────────────────────────┐  │
-│  │ MCP Tool Server (mcp_server.py)                          │  │
-│  │ • write_file(path, content)  [Path-jailed to /workspace] │  │
-│  │ • read_file(path)            [Line-numbered output]      │  │
-│  │ • compile_and_test()         [Deterministic gcc + run]   │  │
+│  │ MCP Tool Server (mcp_server.py v0.2.0)                   │  │
+│  │ • find_files / grep_search   [Pruned repo navigation]    │  │
+│  │ • read_file / edit_file      [Paged read + exact patch]  │  │
+│  │ • write_file                 [Symlink-safe path jail]    │  │
+│  │ • compile_and_test()         [Gradle / kotlinc / gcc]    │  │
 │  │ • git_diff()                 [Clean patch for Critic]    │  │
 │  └──────────────────────────────────────────────────────────┘  │
+│                                                                │
+│  RLVR Loop: Approved runs -> trajectories.jsonl -> rlvr_mlx.py │
 └────────────────────────────────────────────────────────────────┘
 ```
 
@@ -46,10 +49,16 @@ source .venv/bin/activate
 pip install -r requirements.txt
 
 # Run the default multi-threaded Kotlin rate-limiter benchmark
-python3 orchestrator.py
+python3 orchestrator.py --model qwen2.5-coder:7b
 
-# Or pass any custom C or Kotlin systems task
-python3 orchestrator.py "Create ringbuf.h and ringbuf.c implementing a thread-safe bounded ring buffer using pthread_mutex_t and pthread_cond_t. Create test_ringbuf.c verifying total items and sum checksum."
+# Run against an existing Android/Gradle, Kotlin, or C repository (non-destructive, auto-loads AGENTS.md)
+python3 orchestrator.py --workspace /path/to/repo --task /path/to/task.md --model qwen2.5-coder:7b
+
+# Run fast offline harness & security tests
+python3 -m unittest test_harness.py -v
+
+# Export Critic-approved trajectories for Apple Silicon MLX LoRA fine-tuning
+python3 rlvr_mlx.py
 ```
 
 ## Hardware & Memory Telemetry (Apple Silicon)
@@ -58,8 +67,10 @@ Tested on a **2025 MacBook Air (24GB Unified Memory)**:
 * **Context Sizing:** Configured for `8192`–`16384` token context windows to hold full source diffs and compiler logs without exceeding unified memory ceilings.
 
 ## Roadmap
-* [x] Zero-dependency MCP `stdio` JSON-RPC 2.0 server with path-jail isolation
-* [x] Fresh-context Critic agent auditing `git diff` + deterministic exit codes
-* [x] Live token streaming & CLI task parameterization
+* [x] Zero-dependency MCP `stdio` JSON-RPC 2.0 server with symlink-safe path-jail isolation (`mcp_server.py`)
+* [x] Fresh-context Critic agent auditing `git diff` + deterministic exit codes (`orchestrator.py`)
+* [x] Live token streaming, `--workspace` / `--task` flags, and `AGENTS.md` auto-loading
+* [x] Fast offline unit & security test suite (`test_harness.py`)
+* [x] Layer 4 RLVR trajectory logging (`trajectories.jsonl`) + Apple MLX LoRA exporter/runner (`rlvr_mlx.py`)
 * [ ] Containerized Linux execution backend (Colima / Docker / gVisor)
-* [ ] Native on-device Android NDK (`llama.cpp`) local agent port
+* [ ] **Milestone 3:** Native on-device Android NDK (`llama.cpp` + JNI + Jetpack Compose) local agent port

@@ -6,3 +6,5 @@ saved_*/
 .DS_Store
 my-notes/
 trajectories.jsonl
+mlx_data/
+adapters/

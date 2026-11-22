@@ -23,13 +23,17 @@ Project instructions and architectural reference for AI agents operating in this
   - Exposes `unix-sandbox-mcp` (`protocolVersion: 2024-11-05`) over `stdin`/`stdout`.
   - Spawned as a subprocess by `MCPClient` in `orchestrator.py`.
 
+- **`rlvr_mlx.py` (Layer 4 RLVR Dataset Exporter & Apple MLX LoRA Runner):**
+  - Reads Critic-approved, `EXIT_CODE: 0` runs logged to `trajectories.jsonl` by `orchestrator.py` (`--trajectories`).
+  - Exports normalized `{"messages": [...]}` splits (`mlx_data/train.jsonl`, `mlx_data/valid.jsonl`) and optionally runs `python -m mlx_lm.lora` (`--train`).
+
 ## 2. Path-Jail Security Rules
 
 All filesystem tools in `mcp_server.py` are strictly confined to `WORKSPACE`:
 
 - **Workspace Resolution (`resolve_workspace`):** Reads `--workspace <path>` (or `MCP_WORKSPACE` env var, defaulting to `./workspace`) and canonicalizes it via `os.path.realpath(os.path.abspath(...))`.
 - **Symlink-Safe Path Jail (`safe_path`):**
-  - Resolves parent directories via `os.path.realpath(os.path.dirname(candidate))` and joins the basename.
+  - Resolves the full candidate path via `os.path.realpath(candidate)` (covering both parent directories and leaf symlinks, while supporting non-existent target files for `write_file`).
   - Enforces `os.path.commonpath([WORKSPACE, target]) == WORKSPACE`.
   - Any `../` traversal or symlink pointing outside `WORKSPACE` raises `ValueError("Access denied: '...' escapes workspace")`.
 - **Directory Pruning (`PRUNE_DIRS`):** `find_files` and `grep_search` skip `.git`, `.gradle`, `build`, `.idea`, `.cxx`, `captures`, `__pycache__`, and `node_modules`.

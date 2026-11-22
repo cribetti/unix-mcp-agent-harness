@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 import orchestrator
+import rlvr_mlx
 
 HARNESS_DIR = os.path.dirname(os.path.abspath(__file__))
 MCP_SERVER = os.path.join(HARNESS_DIR, "mcp_server.py")
@@ -140,6 +141,33 @@ class TestHarness(unittest.TestCase):
             self.assertEqual(rows[0]["turns"], 2)
             self.assertIn("timestamp", rows[0])
             self.assertEqual(rows[1]["critic_rejections"], 1)
+
+    def test_rlvr_mlx_export(self):
+        with tempfile.TemporaryDirectory() as td:
+            traj_path = os.path.join(td, "trajectories.jsonl")
+            out_dir = os.path.join(td, "mlx_data")
+            sample_msgs = [
+                {"role": "system", "content": "You are a systems engineer."},
+                {"role": "user", "content": "Write Main.kt"},
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"id": "c1", "type": "function", "function": {"name": "write_file", "arguments": "{\"path\": \"Main.kt\"}"}}
+                    ],
+                },
+                {"role": "tool", "tool_call_id": "c1", "content": "Wrote Main.kt"},
+            ]
+            with open(traj_path, "w", encoding="utf-8") as f:
+                for i in range(3):
+                    f.write(json.dumps({"spec": f"task {i}", "messages": sample_msgs}) + "\n")
+
+            n_train, n_valid = rlvr_mlx.export_mlx_dataset(traj_path, out_dir, val_split=0.2)
+            self.assertEqual((n_train, n_valid), (2, 1))
+            with open(os.path.join(out_dir, "train.jsonl"), "r", encoding="utf-8") as f:
+                row = json.loads(f.readline())
+            self.assertEqual(len(row["messages"]), 4)
+            self.assertIn("write_file", row["messages"][2]["content"])
 
 
 if __name__ == "__main__":
