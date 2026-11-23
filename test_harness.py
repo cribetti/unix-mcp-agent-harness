@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 
+import eval as eval_harness
 import orchestrator
 import rlvr_mlx
 
@@ -168,6 +169,30 @@ class TestHarness(unittest.TestCase):
                 row = json.loads(f.readline())
             self.assertEqual(len(row["messages"]), 4)
             self.assertIn("write_file", row["messages"][2]["content"])
+
+    def test_eval_harness_parsing_and_summary(self):
+        sample_stdout = (
+            "=== [Coder Turn 1 | qwen2.5-coder:7b] ===\n"
+            "=== [Coder Turn 2 | qwen2.5-coder:7b] ===\n"
+            "=== APPROVED BY CRITIC & VERIFIED EXIT 0 ===\n"
+        )
+        passed, turns = eval_harness.parse_orchestrator_output(sample_stdout)
+        self.assertTrue(passed)
+        self.assertEqual(turns, 2)
+
+        summary = eval_harness.summarize_results(
+            "qwen2.5-coder:7b",
+            [
+                {"id": "t1", "passed": True, "turns": 2, "elapsed_sec": 30.0},
+                {"id": "t2", "passed": False, "turns": 8, "elapsed_sec": 90.0},
+            ],
+        )
+        self.assertEqual(summary["passed"], 1)
+        self.assertEqual(summary["total"], 2)
+        self.assertEqual(summary["pass_rate_pct"], 50.0)
+        table = eval_harness.format_summary_table([summary])
+        self.assertIn("1/2 (50.0%)", table)
+        self.assertEqual(len(eval_harness.load_eval_tasks(None)), 6)
 
 
 if __name__ == "__main__":

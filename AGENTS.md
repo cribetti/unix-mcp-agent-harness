@@ -27,6 +27,9 @@ Project instructions and architectural reference for AI agents operating in this
   - Reads Critic-approved, `EXIT_CODE: 0` runs logged to `trajectories.jsonl` by `orchestrator.py` (`--trajectories`).
   - Exports normalized `{"messages": [...]}` splits (`mlx_data/train.jsonl`, `mlx_data/valid.jsonl`), automatically unloads cached Ollama models (`ollama stop`) and passes `--grad-checkpoint` to `python -m mlx_lm lora` (`--train`, auto-clamping `--batch-size`), fuses adapters (`--fuse`), and exports `.gguf` (`--export-gguf`) via `llama.cpp/convert_hf_to_gguf.py`.
 
+- **`eval.py` (Held-Out Evaluation Harness):**
+  - Benchmarks one or more Ollama models (`--models`) across a 6-task held-out C/Kotlin suite (or `--tasks-file`) without polluting `trajectories.jsonl`, outputting pass rate, average turns, and `eval_results.json`.
+
 ## 2. Path-Jail Security Rules
 
 All filesystem tools in `mcp_server.py` are strictly confined to `WORKSPACE`:

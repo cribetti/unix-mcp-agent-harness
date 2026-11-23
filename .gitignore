@@ -4,9 +4,9 @@ __pycache__/
 workspace/
 saved_*/
 .DS_Store
-my-notes/
 trajectories.jsonl
 mlx_data/
 adapters/
 fused_model/
 *.gguf
+eval_results.json

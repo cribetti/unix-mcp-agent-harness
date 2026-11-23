@@ -62,6 +62,9 @@ python3 rlvr_mlx.py
 
 # Train, fuse, and export a custom .gguf for Android / Ollama
 python3 rlvr_mlx.py --model mlx-community/Qwen2.5-Coder-1.5B-Instruct-4bit --train --fuse --export-gguf ./custom-qwen.gguf
+
+# Benchmark models on the held-out evaluation suite
+python3 eval.py --models qwen2.5-coder:7b qwen3:8b
 ```
 
 ## Hardware & Memory Telemetry (Apple Silicon)
@@ -75,5 +78,6 @@ Tested on a **2025 MacBook Air (24GB Unified Memory)**:
 * [x] Live token streaming, `--workspace` / `--task` flags, and `AGENTS.md` auto-loading
 * [x] Fast offline unit & security test suite (`test_harness.py`)
 * [x] Layer 4 RLVR trajectory logging (`trajectories.jsonl`) + Apple MLX LoRA exporter/runner/GGUF export (`rlvr_mlx.py`)
+* [x] Held-out evaluation harness (`eval.py`) for comparing base vs. fine-tuned models
 * [ ] Containerized Linux execution backend (Colima / Docker / gVisor)
 * [x] **Milestone 3:** Native on-device Android NDK (`llama.cpp` + JNI + Jetpack Compose) local agent port (`../android-ndk-agent`)
