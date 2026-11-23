@@ -22,6 +22,7 @@ Project instructions and architectural reference for AI agents operating in this
 - **`mcp_server.py` (v0.2.0 — JSON-RPC 2.0 `stdio` MCP Server):**
   - Exposes `unix-sandbox-mcp` (`protocolVersion: 2024-11-05`) over `stdin`/`stdout`.
   - Spawned as a subprocess by `MCPClient` in `orchestrator.py`.
+  - Supports `--sandbox host` (default) or `--sandbox docker` (`docker run --rm --network=none`) for `compile_and_test`.
 
 - **`rlvr_mlx.py` (Layer 4 RLVR Dataset Exporter & Apple MLX LoRA Runner):**
   - Reads Critic-approved, `EXIT_CODE: 0` runs logged to `trajectories.jsonl` by `orchestrator.py` (`--trajectories`).

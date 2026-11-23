@@ -8,16 +8,17 @@ import subprocess
 import sys
 
 
-def resolve_workspace() -> str:
+def resolve_config() -> tuple[str, str]:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--workspace", default=os.environ.get("MCP_WORKSPACE", "./workspace"))
+    parser.add_argument("--sandbox", choices=["host", "docker"], default=os.environ.get("MCP_SANDBOX", "host"))
     args, _ = parser.parse_known_args()
     ws = os.path.realpath(os.path.abspath(args.workspace))
     os.makedirs(ws, exist_ok=True)
-    return ws
+    return ws, args.sandbox
 
 
-WORKSPACE = resolve_workspace()
+WORKSPACE, SANDBOX_MODE = resolve_config()
 
 PRUNE_DIRS = {
     ".git",
@@ -289,12 +290,18 @@ def tool_write_file(args: dict) -> str:
     return f"Wrote {len(content)} bytes to {args['path']}"
 
 
-def tool_compile_and_test() -> str:
-    gradlew = os.path.join(WORKSPACE, "gradlew")
+def build_test_command(
+    workspace: str,
+    sandbox: str = "host",
+    docker_image: str | None = None,
+) -> tuple[list[str], int]:
+    """Build the compile_and_test command and timeout for host or --network=none docker execution."""
+    gradlew = os.path.join(workspace, "gradlew")
     if os.path.exists(gradlew):
         cmd = "chmod +x ./gradlew && ./gradlew testDebugUnitTest --stacktrace"
         timeout_sec = 180
-    elif any(f.endswith(".kt") for f in os.listdir(WORKSPACE)):
+        default_img = "eclipse-temurin:21"
+    elif any(f.endswith(".kt") for f in os.listdir(workspace)):
         cmd = (
             'KLIB=$(dirname "$(realpath "$(which kotlinc)")")/../libexec/lib; '
             'CP=$(ls "$KLIB"/kotlin-test*.jar 2>/dev/null | tr "\\n" ":"); '
@@ -302,13 +309,42 @@ def tool_compile_and_test() -> str:
             'java -ea -cp "test_app.jar:$CP" MainKt'
         )
         timeout_sec = 45
+        default_img = "eclipse-temurin:21"
     else:
         cmd = "gcc -O2 -g -Wall -pthread *.c -o test_app && ./test_app"
         timeout_sec = 30
+        default_img = "gcc:14"
 
+    if sandbox == "docker":
+        img = docker_image or os.environ.get("MCP_DOCKER_IMAGE", default_img)
+        return (
+            [
+                "docker",
+                "run",
+                "--rm",
+                "--network=none",
+                "-v",
+                f"{workspace}:/workspace",
+                "-w",
+                "/workspace",
+                img,
+                "bash",
+                "-c",
+                cmd,
+            ],
+            timeout_sec,
+        )
+    return ["bash", "-c", cmd], timeout_sec
+
+
+def tool_compile_and_test() -> str:
+    if SANDBOX_MODE == "docker" and not shutil.which("docker"):
+        return "EXIT_CODE: 1\nSTDOUT:\n\nSTDERR:\nERROR: --sandbox docker requested, but 'docker' CLI was not found on PATH."
+
+    full_cmd, timeout_sec = build_test_command(WORKSPACE, sandbox=SANDBOX_MODE)
     try:
         res = subprocess.run(
-            ["bash", "-c", cmd],
+            full_cmd,
             cwd=WORKSPACE,
             capture_output=True,
             text=True,

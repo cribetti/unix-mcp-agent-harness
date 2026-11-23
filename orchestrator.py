@@ -22,8 +22,8 @@ DEFAULT_SPEC = (
 class MCPClient:
     """Lightweight JSON-RPC 2.0 client communicating with mcp_server.py over stdio pipes."""
 
-    def __init__(self, script_path: str, workspace: str | None = None):
-        cmd = [sys.executable, script_path]
+    def __init__(self, script_path: str, workspace: str | None = None, sandbox: str = "host"):
+        cmd = [sys.executable, script_path, "--sandbox", sandbox]
         if workspace:
             cmd.extend(["--workspace", workspace])
         self.proc = subprocess.Popen(
@@ -311,6 +311,12 @@ def main():
         default=None,
         help="Target repository path (if omitted, resets clean-room ./workspace)",
     )
+    parser.add_argument(
+        "--sandbox",
+        choices=["host", "docker"],
+        default="host",
+        help="Execution backend for compile_and_test (default: host; use docker for --network=none container)",
+    )
     parser.add_argument("--model", default="qwen3:8b", help="Local Ollama model name (default: qwen3:8b)")
     parser.add_argument("--base-url", default="http://localhost:11434/v1", help="OpenAI-compatible endpoint URL")
     parser.add_argument("--max-turns", type=int, default=12, help="Maximum Coder turns before aborting")
@@ -353,7 +359,7 @@ def main():
 
     mcp_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mcp_server.py")
     client = OpenAI(base_url=args.base_url, api_key="ollama", timeout=300.0)
-    mcp = MCPClient(mcp_script, workspace=workspace)
+    mcp = MCPClient(mcp_script, workspace=workspace, sandbox=args.sandbox)
     openai_tools = mcp.get_openai_tools()
 
     messages = [

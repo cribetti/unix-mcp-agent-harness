@@ -79,5 +79,5 @@ Tested on a **2025 MacBook Air (24GB Unified Memory)**:
 * [x] Fast offline unit & security test suite (`test_harness.py`)
 * [x] Layer 4 RLVR trajectory logging (`trajectories.jsonl`) + Apple MLX LoRA exporter/runner/GGUF export (`rlvr_mlx.py`)
 * [x] Held-out evaluation harness (`eval.py`) for comparing base vs. fine-tuned models
-* [ ] Containerized Linux execution backend (Colima / Docker / gVisor)
+* [x] Containerized Linux execution backend (`--sandbox docker` with `--network=none` in `mcp_server.py` / `orchestrator.py`)
 * [x] **Milestone 3:** Native on-device Android NDK (`llama.cpp` + JNI + Jetpack Compose) local agent port (`../android-ndk-agent`)

@@ -7,6 +7,7 @@ import tempfile
 import unittest
 
 import eval as eval_harness
+import mcp_server
 import orchestrator
 import rlvr_mlx
 
@@ -210,6 +211,16 @@ class TestHarness(unittest.TestCase):
         table = eval_harness.format_summary_table([summary])
         self.assertIn("1/2 (50.0%)", table)
         self.assertEqual(len(eval_harness.load_eval_tasks(None)), 6)
+
+    def test_mcp_docker_sandbox_command_builder(self):
+        with tempfile.TemporaryDirectory() as td:
+            with open(os.path.join(td, "main.c"), "w", encoding="utf-8") as f:
+                f.write("int main(void) { return 0; }\n")
+            cmd, timeout = mcp_server.build_test_command(td, sandbox="docker")
+            self.assertEqual(cmd[:4], ["docker", "run", "--rm", "--network=none"])
+            self.assertIn(f"{td}:/workspace", cmd)
+            self.assertIn("gcc:14", cmd)
+            self.assertEqual(timeout, 30)
 
 
 if __name__ == "__main__":
