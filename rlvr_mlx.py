@@ -2,6 +2,7 @@ import argparse
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 
@@ -77,6 +78,21 @@ def export_mlx_dataset(
     return len(train_samples), len(valid_samples)
 
 
+def unload_ollama_models() -> None:
+    """Free Unified Memory by unloading any cached Ollama models before MLX training."""
+    if not shutil.which("ollama"):
+        return
+    try:
+        res = subprocess.run(["ollama", "ps"], capture_output=True, text=True, timeout=5)
+        for line in res.stdout.splitlines()[1:]:
+            parts = line.split()
+            if parts:
+                subprocess.run(["ollama", "stop", parts[0]], capture_output=True, timeout=5)
+                print(f"[RLVR] Unloaded Ollama model '{parts[0]}' to free Unified Memory", flush=True)
+    except Exception:
+        pass
+
+
 def main():
     here = os.path.dirname(os.path.abspath(__file__))
     parser = argparse.ArgumentParser(description="Layer 4 RLVR: Export trajectories.jsonl and run Apple MLX LoRA")
@@ -116,6 +132,7 @@ def main():
         str(effective_batch),
         "--iters",
         str(args.iters),
+        "--grad-checkpoint",
         "--adapter-path",
         args.adapter_path,
     ]
@@ -125,6 +142,7 @@ def main():
         if importlib.util.find_spec("mlx_lm") is None:
             print("ERROR: mlx-lm is not installed in this environment. Install with: pip install mlx-lm", file=sys.stderr)
             sys.exit(1)
+        unload_ollama_models()
         subprocess.run(cmd, check=True)
 
     if args.fuse:

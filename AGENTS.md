@@ -25,7 +25,7 @@ Project instructions and architectural reference for AI agents operating in this
 
 - **`rlvr_mlx.py` (Layer 4 RLVR Dataset Exporter & Apple MLX LoRA Runner):**
   - Reads Critic-approved, `EXIT_CODE: 0` runs logged to `trajectories.jsonl` by `orchestrator.py` (`--trajectories`).
-  - Exports normalized `{"messages": [...]}` splits (`mlx_data/train.jsonl`, `mlx_data/valid.jsonl`), runs `python -m mlx_lm lora` (`--train`, auto-clamping `--batch-size`), fuses adapters (`--fuse`), and exports `.gguf` (`--export-gguf`) via `llama.cpp/convert_hf_to_gguf.py`.
+  - Exports normalized `{"messages": [...]}` splits (`mlx_data/train.jsonl`, `mlx_data/valid.jsonl`), automatically unloads cached Ollama models (`ollama stop`) and passes `--grad-checkpoint` to `python -m mlx_lm lora` (`--train`, auto-clamping `--batch-size`), fuses adapters (`--fuse`), and exports `.gguf` (`--export-gguf`) via `llama.cpp/convert_hf_to_gguf.py`.
 
 ## 2. Path-Jail Security Rules
 
