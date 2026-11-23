@@ -95,6 +95,23 @@ class TestHarness(unittest.TestCase):
             finally:
                 mcp.close()
 
+    def test_mcp_git_diff_with_single_untracked_kt_file(self):
+        with tempfile.TemporaryDirectory() as td:
+            subprocess.run(
+                "git init -q && git config user.email 't@local' && git config user.name 'T' && git commit --allow-empty -m 'init' -q",
+                shell=True,
+                cwd=td,
+                check=True,
+            )
+            mcp = orchestrator.MCPClient(MCP_SERVER, workspace=td)
+            try:
+                mcp.call_tool("write_file", {"path": "Main.kt", "content": "fun main() { println(\"hi\") }\n"})
+                diff = mcp.call_tool("git_diff", {})
+                self.assertIn("Main.kt", diff)
+                self.assertIn("println", diff)
+            finally:
+                mcp.close()
+
     def test_agents_md_and_task_resolution(self):
         with tempfile.TemporaryDirectory() as td:
             with open(os.path.join(td, "AGENTS.md"), "w", encoding="utf-8") as f:

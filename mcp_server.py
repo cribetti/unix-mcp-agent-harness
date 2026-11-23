@@ -324,16 +324,21 @@ def tool_compile_and_test() -> str:
 
 
 def tool_git_diff() -> str:
-    source_globs = [
-        "*.kt", "*.kts", "*.java", "*.c", "*.cpp", "*.h", "*.hpp", "*.xml", "*.gradle", "*.properties", "*.md",
+    source_exts = {
+        ".kt", ".kts", ".java", ".c", ".cpp", ".h", ".hpp", ".xml", ".gradle", ".properties", ".md",
+    }
+    untracked_or_src = [
+        rel for rel, _ in _iter_workspace_files(WORKSPACE)
+        if os.path.splitext(rel)[1].lower() in source_exts
     ]
-    subprocess.run(
-        ["git", "add", "-N", "--"] + source_globs,
-        cwd=WORKSPACE,
-        capture_output=True,
-    )
+    if untracked_or_src:
+        subprocess.run(
+            ["git", "add", "-N", "--"] + untracked_or_src,
+            cwd=WORKSPACE,
+            capture_output=True,
+        )
     res = subprocess.run(
-        ["git", "diff", "HEAD", "--"] + source_globs + [":!**/build/**", ":!.gradle/**"],
+        ["git", "diff", "HEAD", "--", ".", ":(exclude)build", ":(exclude).gradle"],
         cwd=WORKSPACE,
         capture_output=True,
         text=True,
