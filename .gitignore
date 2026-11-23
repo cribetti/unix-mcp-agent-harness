@@ -8,3 +8,5 @@ my-notes/
 trajectories.jsonl
 mlx_data/
 adapters/
+fused_model/
+*.gguf

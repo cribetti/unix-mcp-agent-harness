@@ -85,22 +85,35 @@ def main():
     parser.add_argument("--val-split", type=float, default=0.1, help="Validation split fraction (default: 0.1)")
     parser.add_argument("--model", default=DEFAULT_MODEL, help=f"HuggingFace/MLX model (default: {DEFAULT_MODEL})")
     parser.add_argument("--iters", type=int, default=100, help="LoRA training iterations (default: 100)")
+    parser.add_argument("--batch-size", type=int, default=4, help="Max LoRA batch size (auto-clamped to dataset size)")
     parser.add_argument("--adapter-path", default=os.path.join(here, "adapters"), help="Output LoRA adapter directory")
-    parser.add_argument("--train", action="store_true", help="Invoke python -m mlx_lm.lora after exporting")
+    parser.add_argument("--fused-path", default=os.path.join(here, "fused_model"), help="Output directory for fused HF model")
+    parser.add_argument("--train", action="store_true", help="Invoke python -m mlx_lm lora after exporting")
+    parser.add_argument("--fuse", action="store_true", help="Fuse LoRA adapter into base model (--dequantize for GGUF export)")
+    parser.add_argument("--export-gguf", default=None, metavar="OUT_GGUF", help="Convert fused model to GGUF via llama.cpp")
+    parser.add_argument(
+        "--llama-cpp-dir",
+        default=os.path.abspath(os.path.join(here, "..", "android-ndk-agent", "app", "src", "main", "cpp", "third_party", "llama.cpp")),
+        help="Path to llama.cpp checkout containing convert_hf_to_gguf.py",
+    )
     args = parser.parse_args()
 
     n_train, n_valid = export_mlx_dataset(args.input, args.out_dir, val_split=args.val_split)
+    effective_batch = max(1, min(args.batch_size, n_train, n_valid))
     print(f"[RLVR] Exported {n_train} train + {n_valid} valid samples to {args.out_dir}", flush=True)
 
     cmd = [
         sys.executable,
         "-m",
-        "mlx_lm.lora",
+        "mlx_lm",
+        "lora",
         "--model",
         args.model,
         "--train",
         "--data",
         args.out_dir,
+        "--batch-size",
+        str(effective_batch),
         "--iters",
         str(args.iters),
         "--adapter-path",
@@ -113,6 +126,43 @@ def main():
             print("ERROR: mlx-lm is not installed in this environment. Install with: pip install mlx-lm", file=sys.stderr)
             sys.exit(1)
         subprocess.run(cmd, check=True)
+
+    if args.fuse:
+        if importlib.util.find_spec("mlx_lm") is None:
+            print("ERROR: mlx-lm is not installed in this environment. Install with: pip install mlx-lm", file=sys.stderr)
+            sys.exit(1)
+        fuse_cmd = [
+            sys.executable,
+            "-m",
+            "mlx_lm",
+            "fuse",
+            "--model",
+            args.model,
+            "--adapter-path",
+            args.adapter_path,
+            "--save-path",
+            args.fused_path,
+            "--dequantize",
+        ]
+        print(f"[RLVR] Fusing adapter:\n  {' '.join(fuse_cmd)}", flush=True)
+        subprocess.run(fuse_cmd, check=True)
+
+    if args.export_gguf:
+        converter = os.path.join(args.llama_cpp_dir, "convert_hf_to_gguf.py")
+        if not os.path.isfile(converter):
+            print(f"ERROR: convert_hf_to_gguf.py not found at {converter}", file=sys.stderr)
+            sys.exit(1)
+        gguf_cmd = [
+            sys.executable,
+            converter,
+            args.fused_path,
+            "--outfile",
+            args.export_gguf,
+            "--outtype",
+            "q8_0",
+        ]
+        print(f"[RLVR] Exporting GGUF:\n  {' '.join(gguf_cmd)}", flush=True)
+        subprocess.run(gguf_cmd, check=True)
 
 
 if __name__ == "__main__":
