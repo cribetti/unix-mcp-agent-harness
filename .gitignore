@@ -11,3 +11,4 @@ adapters/
 fused_model/
 *.gguf
 eval_results*.json
+AUDIT_PACKET.md

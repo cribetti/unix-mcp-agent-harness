@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 
+import audit_packet
 import eval as eval_harness
 import generate_tasks
 import harvest_rlvr
@@ -20,7 +21,7 @@ ORCHESTRATOR = os.path.join(HARNESS_DIR, "orchestrator.py")
 
 class TestHarness(unittest.TestCase):
     def test_py_compile(self):
-        for fname in ("mcp_server.py", "orchestrator.py", "rlvr_mlx.py", "eval.py", "generate_tasks.py", "harvest_rlvr.py"):
+        for fname in ("mcp_server.py", "orchestrator.py", "rlvr_mlx.py", "eval.py", "generate_tasks.py", "harvest_rlvr.py", "audit_packet.py"):
             py_compile.compile(os.path.join(HARNESS_DIR, fname), doraise=True)
 
     def test_mcp_stdio_initialize_tools_and_path_jail(self):
@@ -355,6 +356,57 @@ class TestHarness(unittest.TestCase):
             )
             self.assertIsNotNone(err4)
             self.assertIn("missingSpecTestName", err4)
+
+    def test_audit_packet_generation_and_sanity_flags(self):
+        with tempfile.TemporaryDirectory() as td:
+            traj = os.path.join(td, "trajectories.jsonl")
+            out_md = os.path.join(td, "AUDIT_PACKET.md")
+            records = [
+                {
+                    "model": "qwen2.5-coder:7b",
+                    "spec": "Create `Main.kt`",
+                    "turns": 1,
+                    "critic_rejections": 0,
+                    "critic_verdict": "APPROVED: ok",
+                    "git_diff": "diff --git a/sub b/sub\n-Subproject commit abc\n",
+                    "messages": [],
+                },
+                {
+                    "model": "qwen3:14b",
+                    "spec": "Fix `CMakeLists.txt` and `crypto_buf.cpp`",
+                    "turns": 6,
+                    "critic_rejections": 0,
+                    "critic_verdict": "APPROVED: clean C++17 fix",
+                    "git_diff": "diff --git a/CMakeLists.txt b/CMakeLists.txt\n@@ -1 +1 @@\n-set(CMAKE_CXX_STANDARD 14)\n+set(CMAKE_CXX_STANDARD 17)\n",
+                    "messages": [
+                        {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [{"function": {"name": "read_file", "arguments": {"path": "CMakeLists.txt"}}}],
+                        },
+                        {"role": "tool", "content": "   1: set(CMAKE_CXX_STANDARD 14)"},
+                    ],
+                },
+                {
+                    "model": "qwen2.5-coder:7b",
+                    "spec": "Create `ring.c`",
+                    "turns": 2,
+                    "critic_rejections": 0,
+                    "critic_verdict": "APPROVED: ok",
+                    "git_diff": "diff --git a/ring.c b/ring.c\n@@ -0,0 +1,2 @@\n+#include <stdio.h>\n+int main() { return 0; }\n",
+                    "messages": [],
+                },
+            ]
+            with open(traj, "w", encoding="utf-8") as f:
+                for r in records:
+                    f.write(json.dumps(r) + "\n")
+
+            report = audit_packet.generate_audit_packet(traj, out_md, seed=42)
+            self.assertTrue(os.path.isfile(out_md))
+            self.assertIn("Total Trajectories:** `3`", report)
+            self.assertIn("submodule_only_diff", report)
+            self.assertIn("suspicious_1_turn", report)
+            self.assertIn("### Sample Row 1 — `qwen3:14b` (CPP)", report)
 
     def test_eval_harness_parsing_and_summary(self):
         sample_stdout = (
