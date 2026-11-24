@@ -161,8 +161,10 @@ def export_mlx_dataset(
             if not line:
                 continue
             record = json.loads(line)
-            if drop_no_diff and record.get("git_diff") == "No changes.":
-                continue
+            if drop_no_diff and "git_diff" in record:
+                diff_txt = record["git_diff"]
+                if diff_txt == "No changes." or "@@ " not in diff_txt:
+                    continue
             msgs = normalize_messages(record.get("messages", []))
             if len(msgs) >= 2:
                 sample = {"messages": msgs}

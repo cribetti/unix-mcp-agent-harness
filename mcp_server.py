@@ -466,7 +466,7 @@ def tool_git_diff() -> str:
             capture_output=True,
         )
     res = subprocess.run(
-        ["git", "diff", "HEAD", "--", ".", ":(exclude)build", ":(exclude).gradle"],
+        ["git", "diff", "HEAD", "--ignore-submodules=all", "--", ".", ":(exclude)build", ":(exclude).gradle"],
         cwd=WORKSPACE,
         capture_output=True,
         text=True,

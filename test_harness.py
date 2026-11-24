@@ -190,10 +190,17 @@ class TestHarness(unittest.TestCase):
                 {"role": "tool", "tool_call_id": "c1", "content": "Wrote Main.kt"},
             ]
             with open(traj_path, "w", encoding="utf-8") as f:
-                # Legacy row without diff should be filtered out by default
+                # Legacy no-diff and submodule-only rows should be filtered out by default
                 f.write(json.dumps({"spec": "legacy", "git_diff": "No changes.", "messages": sample_msgs}) + "\n")
+                f.write(json.dumps({"spec": "submod", "git_diff": "diff --git a/sub b/sub\n-Subproject commit abc\n", "messages": sample_msgs}) + "\n")
                 for i in range(3):
-                    f.write(json.dumps({"spec": f"task {i}", "git_diff": "diff --git a/Main.kt b/Main.kt", "messages": sample_msgs}) + "\n")
+                    f.write(
+                        json.dumps({
+                            "spec": f"task {i}",
+                            "git_diff": "diff --git a/Main.kt b/Main.kt\n@@ -0,0 +1 @@\n+fun main() {}\n",
+                            "messages": sample_msgs,
+                        }) + "\n"
+                    )
 
             n_train, n_valid = rlvr_mlx.export_mlx_dataset(traj_path, out_dir, val_split=0.2)
             self.assertEqual((n_train, n_valid), (2, 1))
@@ -270,6 +277,84 @@ class TestHarness(unittest.TestCase):
             self.assertEqual((kept, removed), (1, 1))
             self.assertTrue(os.path.isfile(traj + ".bak"))
             self.assertEqual(harvest_rlvr.load_existing_specs(traj), {"good_spec"})
+
+    def test_parallel_read_mutate_guard_and_critic_diff_junit_validation(self):
+        # 1. Mixed read + edit/write/compile_and_test batch must block mutations
+        self.assertTrue(orchestrator.is_blocked_mixed_tool({"find_files", "edit_file"}, "edit_file"))
+        self.assertFalse(orchestrator.is_blocked_mixed_tool({"find_files", "edit_file"}, "find_files"))
+        self.assertFalse(orchestrator.is_blocked_mixed_tool({"write_file", "compile_and_test"}, "compile_and_test"))
+
+        # 2. Submodule-only diff (Row 0 poison pattern) must be rejected by Critic precheck
+        submodule_diff = (
+            "diff --git a/app/src/main/cpp/third_party/llama.cpp b/app/src/main/cpp/third_party/llama.cpp\n"
+            "deleted file mode 160000\nindex 94f3af3..0000000\n--- a/app/src/main/cpp/third_party/llama.cpp\n"
+            "+++ /dev/null\n@@ -1 +0,0 @@\n-Subproject commit 94f3af3d09e74a0fb35f703194318d3b4037714a\n"
+        )
+        err = orchestrator.validate_critic_artifacts("Add `note_count` to `ToolBus.kt`", submodule_diff, "EXIT_CODE: 0\n")
+        self.assertIsNotNone(err)
+        self.assertIn("no source/build file code changes", err)
+
+        # 3. Diff touching wrong file vs SPEC must be rejected
+        wrong_file_diff = (
+            "diff --git a/Other.kt b/Other.kt\n--- a/Other.kt\n+++ b/Other.kt\n@@ -1 +1 @@\n-a\n+b\n"
+        )
+        err2 = orchestrator.validate_critic_artifacts("Fix `ToolBus.kt`", wrong_file_diff, "EXIT_CODE: 0\n")
+        self.assertIsNotNone(err2)
+        self.assertIn("does not include any target file", err2)
+
+        # 4. Gradle JUnit XML check catches added @Test that did not execute
+        with tempfile.TemporaryDirectory() as td:
+            with open(os.path.join(td, "gradlew"), "w", encoding="utf-8") as f:
+                f.write("#!/bin/sh\n")
+            xml_dir = os.path.join(td, "app", "build", "test-results", "testDebugUnitTest")
+            os.makedirs(xml_dir, exist_ok=True)
+            with open(os.path.join(xml_dir, "TEST-AgentLoopTest.xml"), "w", encoding="utf-8") as f:
+                f.write('<testsuite tests="1" failures="0" errors="0"><testcase name="existingTest"/></testsuite>')
+
+            good_diff_missing_run = (
+                "diff --git a/app/src/main/java/ToolBus.kt b/app/src/main/java/ToolBus.kt\n"
+                "--- a/app/src/main/java/ToolBus.kt\n+++ b/app/src/main/java/ToolBus.kt\n@@ -1 +1 @@\n-a\n+b\n"
+                "diff --git a/app/src/test/java/AgentLoopTest.kt b/app/src/test/java/AgentLoopTest.kt\n"
+                "--- a/app/src/test/java/AgentLoopTest.kt\n+++ b/app/src/test/java/AgentLoopTest.kt\n@@ -1,2 +1,5 @@\n"
+                "+    @Test\n+    fun toolBusNoteCountReturnsFileCount() {}\n"
+            )
+            err3 = orchestrator.validate_critic_artifacts(
+                "Add `note_count` to `ToolBus.kt`",
+                good_diff_missing_run,
+                "EXIT_CODE: 0\n",
+                workspace=td,
+            )
+            self.assertIsNotNone(err3)
+            self.assertIn("toolBusNoteCountReturnsFileCount", err3)
+
+            with open(os.path.join(xml_dir, "TEST-AgentLoopTest.xml"), "w", encoding="utf-8") as f:
+                f.write(
+                    '<testsuite tests="2" failures="0" errors="0">'
+                    '<testcase name="existingTest"/>'
+                    '<testcase name="toolBusNoteCountReturnsFileCount"/>'
+                    "</testsuite>"
+                )
+            self.assertIsNone(
+                orchestrator.validate_critic_artifacts(
+                    "Add `note_count` to `ToolBus.kt` and add `toolBusNoteCountReturnsFileCount`",
+                    good_diff_missing_run,
+                    "EXIT_CODE: 0\n",
+                    workspace=td,
+                )
+            )
+            # Spec-named test absent from XML must be rejected even if diff only touched ToolBus.kt
+            diff_without_test = (
+                "diff --git a/app/src/main/java/ToolBus.kt b/app/src/main/java/ToolBus.kt\n"
+                "--- a/app/src/main/java/ToolBus.kt\n+++ b/app/src/main/java/ToolBus.kt\n@@ -1 +1 @@\n-a\n+b\n"
+            )
+            err4 = orchestrator.validate_critic_artifacts(
+                "Add `note_count` to `ToolBus.kt` and verify `missingSpecTestName` passes",
+                diff_without_test,
+                "EXIT_CODE: 0\n",
+                workspace=td,
+            )
+            self.assertIsNotNone(err4)
+            self.assertIn("missingSpecTestName", err4)
 
     def test_eval_harness_parsing_and_summary(self):
         sample_stdout = (

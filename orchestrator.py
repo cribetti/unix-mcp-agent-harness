@@ -1,10 +1,12 @@
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import threading
 import time
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from openai import OpenAI
@@ -100,17 +102,20 @@ def stream_turn(
         kwargs = {
             "model": model,
             "messages": messages,
-            "tools": tools,
             "temperature": temp,
             "max_tokens": 4096,
             "stream": True,
         }
+        if tools:
+            kwargs["tools"] = tools
+            kwargs["parallel_tool_calls"] = False
         if reasoning_effort:
             kwargs["reasoning_effort"] = reasoning_effort
         try:
             stream = client.chat.completions.create(**kwargs)
         except TypeError:
             kwargs.pop("reasoning_effort", None)
+            kwargs.pop("parallel_tool_calls", None)
             stream = client.chat.completions.create(**kwargs)
 
         content_parts = []
@@ -201,19 +206,170 @@ def resolve_task_spec(task_arg: str | None, positional_spec: str | None) -> str:
     return DEFAULT_SPEC
 
 
+READ_TOOLS = {"find_files", "grep_search", "read_file"}
+MUTATE_OR_TEST_TOOLS = {"edit_file", "write_file", "compile_and_test"}
+SOURCE_DIFF_EXTS = {
+    ".kt", ".kts", ".java", ".c", ".cpp", ".cc", ".h", ".hpp", ".xml", ".gradle", ".properties", ".md",
+}
+
+
+def is_blocked_mixed_tool(turn_names: set[str], tool_name: str) -> bool:
+    """Block edit/write/compile_and_test in the same parallel batch as find_files/grep_search/read_file."""
+    return bool(turn_names & READ_TOOLS) and (tool_name in MUTATE_OR_TEST_TOOLS)
+
+
+def extract_diff_files_with_hunks(diff: str) -> set[str]:
+    """Return workspace-relative file paths that have real '@@ ' code hunks in unified git diff."""
+    touched: set[str] = set()
+    current_file: str | None = None
+    has_hunk = False
+    is_subproject = False
+    for line in diff.splitlines():
+        if line.startswith("diff --git "):
+            if current_file and has_hunk and not is_subproject:
+                touched.add(current_file)
+            parts = line.split(" ")
+            b_part = parts[-1] if len(parts) >= 4 else ""
+            current_file = b_part[2:] if b_part.startswith("b/") else b_part
+            has_hunk = False
+            is_subproject = False
+        elif line.startswith("@@ "):
+            has_hunk = True
+        elif "Subproject commit " in line:
+            is_subproject = True
+    if current_file and has_hunk and not is_subproject:
+        touched.add(current_file)
+    return touched
+
+
+def extract_added_junit_tests(diff: str) -> list[str]:
+    """Extract newly added @Test method names from Kotlin/Java test diffs."""
+    added: list[str] = []
+    saw_test_ann = False
+    for line in diff.splitlines():
+        if line.startswith("+++ ") or line.startswith("--- "):
+            continue
+        if line.startswith("+"):
+            stripped = line[1:].strip()
+            if stripped.startswith("@Test"):
+                saw_test_ann = True
+                continue
+            if saw_test_ann:
+                m = re.search(r"\b(?:fun|void)\s+([A-Za-z0-9_`]+)\s*\(", stripped)
+                if m:
+                    added.append(m.group(1).strip("`"))
+                    saw_test_ann = False
+                elif stripped and not stripped.startswith("@"):
+                    saw_test_ann = False
+    return added
+
+
+IGNORED_SPEC_TEST_TOKENS = {
+    "test",
+    "tests",
+    "compile_and_test",
+    "testdebugunittest",
+}
+
+
+def extract_spec_junit_tests(spec: str) -> list[str]:
+    """Extract explicit JUnit test method names mentioned in backticks in SPEC (excluding tool/task names)."""
+    names: list[str] = []
+    for token in re.findall(r"`([a-z][A-Za-z0-9_]*)`", spec):
+        low = token.lower()
+        if "test" in low and low not in IGNORED_SPEC_TEST_TOKENS:
+            names.append(token)
+    return names
+
+
+def verify_gradle_junit_results(workspace: str, diff: str, spec: str = "") -> str | None:
+    """Verify Gradle JUnit XML reports exist with zero failures/skips and include expected @Test methods."""
+    if not os.path.isfile(os.path.join(workspace, "gradlew")):
+        return None
+    results_dir = os.path.join(workspace, "app", "build", "test-results", "testDebugUnitTest")
+    if not os.path.isdir(results_dir):
+        return "REJECTED: Gradle JUnit XML directory missing (app/build/test-results/testDebugUnitTest)."
+    xml_files = sorted(f for f in os.listdir(results_dir) if f.startswith("TEST-") and f.endswith(".xml"))
+    if not xml_files:
+        return "REJECTED: No TEST-*.xml reports found in app/build/test-results/testDebugUnitTest."
+
+    total_tests = 0
+    executed_names: set[str] = set()
+    for fname in xml_files:
+        tree = ET.parse(os.path.join(results_dir, fname))
+        root = tree.getroot()
+        total_tests += int(root.attrib.get("tests", 0))
+        failures = int(root.attrib.get("failures", 0))
+        errors = int(root.attrib.get("errors", 0))
+        skipped = int(root.attrib.get("skipped", 0))
+        if failures > 0 or errors > 0 or skipped > 0:
+            return f"REJECTED: Gradle XML {fname} reported failures={failures}, errors={errors}, skipped={skipped}."
+        for tc in root.findall("testcase"):
+            if tc.find("failure") is not None or tc.find("error") is not None or tc.find("skipped") is not None:
+                return f"REJECTED: Gradle testcase '{tc.attrib.get('name', '?')}' failed/errored/skipped in {fname}."
+            name = tc.attrib.get("name")
+            if name:
+                executed_names.add(name)
+
+    if total_tests <= 0:
+        return "REJECTED: Gradle JUnit XML reports show 0 executed tests."
+
+    expected_tests = list(dict.fromkeys(extract_added_junit_tests(diff) + extract_spec_junit_tests(spec)))
+    for test_name in expected_tests:
+        if test_name not in executed_names:
+            return f"REJECTED: Expected @Test '{test_name}' did not execute in Gradle JUnit XML reports."
+    return None
+
+
+def validate_critic_artifacts(spec: str, diff: str, test_out: str, workspace: str | None = None) -> str | None:
+    """Deterministic pre-checks before LLM Critic review. Returns rejection reason or None if valid."""
+    if "EXIT_CODE: 0" not in test_out:
+        return f"Build/Test failed:\n{test_out}"
+    if "AssertionError" in test_out or "Exception in thread" in test_out:
+        return f"REJECTED: Uncaught exception or AssertionError detected in test output:\n{test_out}"
+
+    touched = extract_diff_files_with_hunks(diff)
+    source_touched = {
+        p for p in touched
+        if os.path.splitext(p)[1].lower() in SOURCE_DIFF_EXTS or os.path.basename(p) == "CMakeLists.txt"
+    }
+    if not source_touched:
+        return "REJECTED: git_diff contains no source/build file code changes (empty or submodule-only diff)."
+
+    mentioned = {
+        os.path.basename(m)
+        for m in re.findall(r"`([A-Za-z0-9_./-]+\.(?:kt|kts|java|c|cpp|cc|h|hpp)|CMakeLists\.txt)`", spec)
+    }
+    if mentioned:
+        touched_basenames = {os.path.basename(p) for p in source_touched}
+        if not (mentioned & touched_basenames):
+            return (
+                f"REJECTED: git_diff touched {sorted(source_touched)}, which does not include any target file "
+                f"named in SPEC ({sorted(mentioned)})."
+            )
+
+    if workspace:
+        junit_err = verify_gradle_junit_results(workspace, diff, spec=spec)
+        if junit_err:
+            return junit_err
+    return None
+
+
 def run_critic(
     client: OpenAI,
     model: str,
     mcp: MCPClient,
     spec: str,
     agents_md: str = "",
+    workspace: str | None = None,
 ) -> tuple[bool, str]:
     """Fresh-context Critic agent that audits git diff + deterministic build/test execution."""
     diff = mcp.call_tool("git_diff", {})
     test_out = mcp.call_tool("compile_and_test", {})
 
-    if "EXIT_CODE: 0" not in test_out:
-        return False, f"Build/Test failed:\n{test_out}"
+    precheck_err = validate_critic_artifacts(spec, diff, test_out, workspace=workspace)
+    if precheck_err:
+        return False, precheck_err
 
     critic_system = "You are a strict systems code reviewer."
     if agents_md:
@@ -403,11 +559,17 @@ def main():
             })
 
             if msg.tool_calls:
+                turn_names = {tc.function.name for tc in msg.tool_calls}
                 for tc in msg.tool_calls:
                     call_args = json.loads(tc.function.arguments)
                     print(f"  -> MCP {tc.function.name}({list(call_args.keys())})", flush=True)
                     call_sig = (tc.function.name, json.dumps(call_args, sort_keys=True))
-                    if call_sig == last_call_sig and tc.function.name != "compile_and_test":
+                    if is_blocked_mixed_tool(turn_names, tc.function.name):
+                        out = (
+                            f"BLOCKED: Do not call `{tc.function.name}` in the same turn as "
+                            f"find_files/grep_search/read_file. Read the tool output first, then patch or test in the next turn."
+                        )
+                    elif call_sig == last_call_sig and tc.function.name != "compile_and_test":
                         out = (
                             f"WARNING: Duplicate consecutive call to `{tc.function.name}` with identical arguments blocked. "
                             "Use a different approach (e.g., `write_file` to write the complete corrected file or `compile_and_test` to verify)."
@@ -421,7 +583,7 @@ def main():
                             messages.append({"role": "tool", "tool_call_id": tc.id, "content": out})
                             print("\n=== [Critic Review] ===", flush=True)
                             approved, feedback = run_critic(
-                                client, args.model, mcp, spec, agents_md=agents_md
+                                client, args.model, mcp, spec, agents_md=agents_md, workspace=workspace
                             )
                             if approved:
                                 diff = mcp.call_tool("git_diff", {})
