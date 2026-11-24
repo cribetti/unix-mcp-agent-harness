@@ -1,0 +1,752 @@
+[
+  {
+    "id": "kt_conc_000_c07759",
+    "category": "kotlin_concurrency",
+    "spec": "Fix the race condition in `CardAccumulator.kt` by guarding shared state with `ReentrantLock` (using `try { ... } finally { lock.unlock() }`). Do NOT modify the test invariants in `Main.kt`, and do NOT import `kotlin.test.*`. Ensure `compile_and_test` prints 'ALL TESTS PASSED'.",
+    "workspace_files": {
+      "CardAccumulator.kt": "class CardAccumulator {\n    private var balance: Long = 0L\n    private val entries = mutableListOf<String>()\n\n    fun record(tag: String, amount: Long) {\n        val next = balance + amount\n        Thread.yield()\n        balance = next\n        entries.add(tag)\n    }\n\n    fun totalBalance(): Long = balance\n    fun entryCount(): Int = entries.size\n}\n",
+      "Main.kt": "import java.util.concurrent.CountDownLatch\n\nfun main() {\n    val acc = CardAccumulator()\n    val start = CountDownLatch(1)\n    val workers = (0 until 4).map { tid ->\n        Thread {\n            start.await()\n            for (i in 0 until 100) {\n                acc.record(\"t$tid-$i\", 1L)\n            }\n        }\n    }\n    workers.forEach { it.start() }\n    start.countDown()\n    workers.forEach { it.join() }\n    assert(acc.totalBalance() == 400L) { \"Expected 400, got ${acc.totalBalance()}\" }\n    assert(acc.entryCount() == 400) { \"Expected 400 entries, got ${acc.entryCount()}\" }\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "ndk_cpp_000_5d87c2",
+    "category": "ndk_cpp_cmake",
+    "spec": "Fix the `CMakeLists.txt` build failure and C++17 `std::mutex` bug in `crypto_buf.hpp`/`crypto_buf.cpp` so `cmake` builds and `ctest` passes with zero warnings/deadlocks.",
+    "workspace_files": {
+      "CMakeLists.txt": "cmake_minimum_required(VERSION 3.16)\nproject(crypto_buf_proj LANGUAGES CXX)\nenable_testing()\n# BUG: missing C++17 standard and Threads link, and test_crypto_buf.cpp omitted\nadd_executable(test_crypto_buf crypto_buf.cpp)\nadd_test(NAME crypto_buf_suite COMMAND test_crypto_buf)\n",
+      "crypto_buf.hpp": "#pragma once\n#include <mutex>\n#include <vector>\n#include <cstdint>\n\nclass NativeSessionBuffer {\npublic:\n    explicit NativeSessionBuffer(std::size_t cap) : cap_(cap) {}\n    bool push_token(int64_t val);\n    std::size_t size() const;\n    int64_t sum() const;\nprivate:\n    std::size_t cap_;\n    mutable std::mutex mu_;\n    std::vector<int64_t> data_;\n};\n",
+      "crypto_buf.cpp": "#include \"crypto_buf.hpp\"\n#include <numeric>\n\nbool NativeSessionBuffer::push_token(int64_t val) {\n    std::lock_guard<std::mutex> lock(mu_);\n    if (size() >= cap_) {  // BUG: self-deadlock calling size() while holding non-recursive mu_\n        return false;\n    }\n    data_.push_back(val);\n    return true;\n}\n\nstd::size_t NativeSessionBuffer::size() const {\n    std::lock_guard<std::mutex> lock(mu_);\n    return data_.size();\n}\n\nint64_t NativeSessionBuffer::sum() const {\n    std::lock_guard<std::mutex> lock(mu_);\n    return std::accumulate(data_.begin(), data_.end(), int64_t{0});\n}\n",
+      "test_crypto_buf.cpp": "#include \"crypto_buf.hpp\"\n#include <cassert>\n#include <iostream>\n#include <thread>\n#include <vector>\n\nint main() {\n    NativeSessionBuffer buf(64);\n    std::vector<std::thread> pool;\n    for (int t = 0; t < 4; ++t) {\n        pool.emplace_back([&buf]() {\n            for (int i = 0; i < 4; ++i) {\n                buf.push_token(1);\n            }\n        });\n    }\n    for (auto& th : pool) th.join();\n    assert(buf.size() == static_cast<std::size_t>(16));\n    assert(buf.sum() == 16);\n    std::cout << \"ALL TESTS PASSED\\n\";\n    return 0;\n}\n"
+    }
+  },
+  {
+    "id": "masvs_000_1bddfb",
+    "category": "owasp_masvs",
+    "spec": "Remediate the OWASP MASVS-STORAGE hardcoded secret vulnerability in `VaultStore.kt`: remove the hardcoded signing secret, require an injected/environment secret provider (throwing `IllegalStateException` if blank), use HMAC-SHA256 with constant-time `MessageDigest.isEqual`, and make `verifyToken` pass all assertions in `Main.kt` (do NOT import `kotlin.test.*`).",
+    "workspace_files": {
+      "VaultStore.kt": "class VaultStore(private val keyProvider: () -> ByteArray = { ByteArray(0) }) {\n    companion object {\n        private const val HARDCODED_SECRET = \"sk_live_719176_vault\"\n    }\n\n    fun signToken(payload: String): ByteArray {\n        return (HARDCODED_SECRET + \":\" + payload).toByteArray(Charsets.UTF_8)\n    }\n\n    fun verifyToken(payload: String, sig: ByteArray): Boolean {\n        return signToken(payload).contentEquals(sig)\n    }\n}\n",
+      "Main.kt": "import java.io.File\n\nfun main() {\n    val src = File(\"VaultStore.kt\").readText()\n    assert(!src.contains(\"sk_live_719176_vault\")) { \"Hardcoded secret still present!\" }\n    assert(!src.contains(\"HARDCODED_SECRET\")) { \"Hardcoded constant still present!\" }\n\n    var failedEmpty = false\n    try {\n        VaultStore { ByteArray(0) }.signToken(\"acct=42\")\n    } catch (_: IllegalStateException) {\n        failedEmpty = true\n    }\n    assert(failedEmpty) { \"Blank key must throw IllegalStateException\" }\n\n    val key = \"bank-rotated-ephemeral-key-32bytes\".toByteArray()\n    val store = VaultStore { key }\n    val sig = store.signToken(\"acct=42\")\n    assert(store.verifyToken(\"acct=42\", sig))\n    assert(!store.verifyToken(\"acct=99\", sig))\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "c_sys_000_5e3b30",
+    "category": "c_systems",
+    "spec": "Create `timerq.c` implementing a thread-safe bounded ring buffer of capacity 8 using `pthread_mutex_t` and `pthread_cond_t`, plus a `main()` spawning 4 producer and 4 consumer threads (50 items per producer) verifying exact sum with `assert`, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "kt_conc_001_e9df3d",
+    "category": "kotlin_concurrency",
+    "spec": "Fix `TreasuryBoundedPool.kt` so `acquire()` and `release()` are thread-safe and properly block when empty/full using `ReentrantLock` and `Condition` (`try { ... } finally { lock.unlock() }`), avoiding lost wakeups (`signalAll()`). Do NOT import `kotlin.test.*`. Verify `Main.kt` prints 'ALL TESTS PASSED'.",
+    "workspace_files": {
+      "TreasuryBoundedPool.kt": "import java.util.ArrayDeque\n\nclass TreasuryBoundedPool(private val capacity: Int) {\n    private val items = ArrayDeque<Int>((0 until capacity).toList())\n\n    fun acquire(): Int {\n        if (items.isEmpty()) {\n            throw IllegalStateException(\"Pool exhausted without blocking\")\n        }\n        return items.removeFirst()\n    }\n\n    fun release(item: Int) {\n        items.addLast(item)\n    }\n}\n",
+      "Main.kt": "import java.util.concurrent.atomic.AtomicInteger\n\nfun main() {\n    val pool = TreasuryBoundedPool(4)\n    val completed = AtomicInteger(0)\n    val active = AtomicInteger(0)\n    val maxSeen = AtomicInteger(0)\n    val workers = (0 until 4).map {\n        Thread {\n            for (i in 0 until 25) {\n                val slot = pool.acquire()\n                val cur = active.incrementAndGet()\n                maxSeen.accumulateAndGet(cur, Math::max)\n                Thread.sleep(1)\n                active.decrementAndGet()\n                pool.release(slot)\n                completed.incrementAndGet()\n            }\n        }\n    }\n    workers.forEach { it.start() }\n    workers.forEach { it.join() }\n    assert(completed.get() == 100) { \"Completed=${completed.get()}\" }\n    assert(maxSeen.get() <= 4) { \"Exceeded capacity: ${maxSeen.get()}\" }\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "ndk_cpp_001_8592e3",
+    "category": "ndk_cpp_cmake",
+    "spec": "Fix the JNI-style UTF-8 C++17 buffer truncation/off-by-one and `std::mutex` race in `audit_ring.hpp`/`audit_ring.cpp` and ensure `CMakeLists.txt` builds and passes `ctest` across 4 threads.",
+    "workspace_files": {
+      "CMakeLists.txt": "cmake_minimum_required(VERSION 3.16)\nproject(audit_ring_jni LANGUAGES CXX)\nset(CMAKE_CXX_STANDARD 17)\nset(CMAKE_CXX_STANDARD_REQUIRED ON)\nenable_testing()\nfind_package(Threads REQUIRED)\nadd_executable(test_audit_ring audit_ring.cpp test_audit_ring.cpp)\ntarget_link_libraries(test_audit_ring PRIVATE Threads::Threads)\nadd_test(NAME audit_ring_jni_test COMMAND test_audit_ring)\n",
+      "audit_ring.hpp": "#pragma once\n#include <mutex>\n#include <string>\n\nclass JniStringSlot {\npublic:\n    void set(const char* src);\n    std::string get() const;\n\nprivate:\n    mutable std::mutex mu_;\n    char buf_[32] = {0};\n};\n",
+      "audit_ring.cpp": "#include \"audit_ring.hpp\"\n#include <cstring>\n\nvoid JniStringSlot::set(const char* src) {\n    // BUG: missing mutex lock and off-by-one null terminator copy\n    if (!src) return;\n    std::size_t n = std::strlen(src);\n    if (n > sizeof(buf_)) n = sizeof(buf_);\n    std::memcpy(buf_, src, n);\n}\n\nstd::string JniStringSlot::get() const {\n    return std::string(buf_);\n}\n",
+      "test_audit_ring.cpp": "#include \"audit_ring.hpp\"\n#include <cassert>\n#include <iostream>\n#include <thread>\n#include <vector>\n\nint main() {\n    JniStringSlot slot;\n    std::string long_input(64, 'A');\n    slot.set(long_input.c_str());\n    assert(slot.get().size() == 31);\n\n    std::vector<std::thread> workers;\n    for (int t = 0; t < 4; ++t) {\n        workers.emplace_back([&slot, t]() {\n            for (int i = 0; i < 400; ++i) {\n                std::string s = \"token_\" + std::to_string(t);\n                slot.set(s.c_str());\n                assert(!slot.get().empty());\n            }\n        });\n    }\n    for (auto& w : workers) w.join();\n    std::cout << \"ALL TESTS PASSED\\n\";\n    return 0;\n}\n"
+    }
+  },
+  {
+    "id": "masvs_001_679819",
+    "category": "owasp_masvs",
+    "spec": "Remediate the OWASP MASVS-STORAGE / path-traversal vulnerability in `EscrowGuard.kt`: enforce strict `canonicalPath` sandbox jailing inside `rootDir` (rejecting absolute paths, `../` traversal, and symlinks escaping `rootDir` with `SecurityException`), and ensure all assertions in `Main.kt` pass.",
+    "workspace_files": {
+      "EscrowGuard.kt": "import java.io.File\n\nclass EscrowGuard(private val rootDir: File) {\n    init { rootDir.mkdirs() }\n\n    fun readEntry(relPath: String): String {\n        val target = File(rootDir, relPath)\n        return target.readText(Charsets.UTF_8)\n    }\n\n    fun writeEntry(relPath: String, content: String) {\n        val target = File(rootDir, relPath)\n        target.parentFile?.mkdirs()\n        target.writeText(content, Charsets.UTF_8)\n    }\n}\n",
+      "Main.kt": "import java.io.File\nimport java.nio.file.Files\n\nfun main() {\n    val tmp = Files.createTempDirectory(\"masvs_jail_\").toFile()\n    val outside = Files.createTempFile(\"masvs_secret_\", \".txt\").toFile()\n    outside.writeText(\"TOP_SECRET_BANK_KEY\")\n    val sandbox = File(tmp, \"sandbox\")\n    val store = EscrowGuard(sandbox)\n    store.writeEntry(\"ok.txt\", \"safe-payload\")\n    assert(store.readEntry(\"ok.txt\") == \"safe-payload\")\n\n    var blockedTraversal = false\n    try {\n        store.readEntry(\"../\" + outside.name)\n    } catch (_: SecurityException) {\n        blockedTraversal = true\n    }\n    assert(blockedTraversal) { \"Path traversal was not blocked!\" }\n\n    var blockedAbs = false\n    try {\n        store.readEntry(outside.absolutePath)\n    } catch (_: SecurityException) {\n        blockedAbs = true\n    }\n    assert(blockedAbs) { \"Absolute path escape was not blocked!\" }\n\n    val sym = File(sandbox, \"escape_link.txt\").toPath()\n    Files.createSymbolicLink(sym, outside.toPath())\n    var blockedSymlink = false\n    try {\n        store.readEntry(\"escape_link.txt\")\n    } catch (_: SecurityException) {\n        blockedSymlink = true\n    }\n    assert(blockedSymlink) { \"Symlink escape was not blocked!\" }\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "c_sys_001_ad2be1",
+    "category": "c_systems",
+    "spec": "Create `slab.c` implementing a thread-safe concurrent integer hash table or bucket counter with per-bucket `pthread_mutex_t` locks, plus a `main()` spawning 8 threads inserting 100 keys each and verifying total count == 800 with `assert`, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "kt_conc_002_6d7659",
+    "category": "kotlin_concurrency",
+    "spec": "Create `Main.kt` implementing a thread-safe single-lane `EscrowDispatcher` coroutine-style task serializer using `ReentrantLock` (`try { ... } finally { lock.unlock() }`) and a `Condition` worker queue so `submit(task)` executes tasks strictly FIFO without concurrent overlap. In `Main.kt`, use `Thread { ... }` and `assert(condition)` (do NOT import `kotlin.test.*` or `kotlinx.coroutines`) to verify 4 threads x 150 tasks complete in-order with zero overlap, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "ndk_cpp_002_dfaec4",
+    "category": "ndk_cpp_cmake",
+    "spec": "Fix the lock-ordering deadlock and `CMakeLists.txt` C++17 standard in `native_vault.hpp`/`native_vault.cpp` and `CMakeLists.txt` using `std::scoped_lock` across dual account transfers so `ctest` passes.",
+    "workspace_files": {
+      "CMakeLists.txt": "cmake_minimum_required(VERSION 3.16)\nproject(native_vault_ledger LANGUAGES CXX)\nset(CMAKE_CXX_STANDARD 14)\nset(CMAKE_CXX_STANDARD_REQUIRED ON)\nenable_testing()\nfind_package(Threads REQUIRED)\nadd_executable(test_native_vault native_vault.cpp test_native_vault.cpp)\ntarget_link_libraries(test_native_vault PRIVATE Threads::Threads)\nadd_test(NAME native_vault_deadlock_test COMMAND test_native_vault)\n",
+      "native_vault.hpp": "#pragma once\n#include <cstdint>\n#include <mutex>\n\nstruct NativeAccount {\n    std::mutex mu;\n    int64_t balance{1000};\n};\n\nbool transfer(NativeAccount& from, NativeAccount& to, int64_t amount);\n",
+      "native_vault.cpp": "#include \"native_vault.hpp\"\n\nbool transfer(NativeAccount& from, NativeAccount& to, int64_t amount) {\n    if (&from == &to || amount <= 0) return false;\n    // BUG: locks in caller order -> AB/BA deadlock under concurrent opposite transfers\n    std::lock_guard<std::mutex> g1(from.mu);\n    std::lock_guard<std::mutex> g2(to.mu);\n    if (from.balance < amount) return false;\n    from.balance -= amount;\n    to.balance += amount;\n    return true;\n}\n",
+      "test_native_vault.cpp": "#include \"native_vault.hpp\"\n#include <cassert>\n#include <iostream>\n#include <thread>\n\nint main() {\n    NativeAccount a, b;\n    std::thread t1([&]() {\n        for (int i = 0; i < 400; ++i) transfer(a, b, 1);\n    });\n    std::thread t2([&]() {\n        for (int i = 0; i < 400; ++i) transfer(b, a, 1);\n    });\n    t1.join();\n    t2.join();\n    assert(a.balance + b.balance == 2000);\n    std::cout << \"ALL TESTS PASSED\\n\";\n    return 0;\n}\n"
+    }
+  },
+  {
+    "id": "masvs_002_0902cf",
+    "category": "owasp_masvs",
+    "spec": "Remediate the OWASP MASVS-CRYPTO vulnerability in `ClearingRegistry.kt`: replace `AES/ECB/PKCS5Padding` and static zero IV with `AES/GCM/NoPadding` using a fresh 12-byte `SecureRandom` IV per encryption and 128-bit authentication tag, storing `iv || ciphertext` so `Main.kt` assertions pass.",
+    "workspace_files": {
+      "ClearingRegistry.kt": "import javax.crypto.Cipher\nimport javax.crypto.spec.SecretKeySpec\n\nclass ClearingRegistry(private val rawKey: ByteArray) {\n    fun encrypt(plaintext: ByteArray): ByteArray {\n        val cipher = Cipher.getInstance(\"AES/ECB/PKCS5Padding\")\n        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(rawKey, \"AES\"))\n        return cipher.doFinal(plaintext)\n    }\n\n    fun decrypt(ciphertext: ByteArray): ByteArray {\n        val cipher = Cipher.getInstance(\"AES/ECB/PKCS5Padding\")\n        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(rawKey, \"AES\"))\n        return cipher.doFinal(ciphertext)\n    }\n}\n",
+      "Main.kt": "import java.io.File\nimport java.security.SecureRandom\n\nfun main() {\n    val src = File(\"ClearingRegistry.kt\").readText()\n    assert(!src.contains(\"AES/ECB\")) { \"Insecure AES/ECB still used!\" }\n    assert(src.contains(\"AES/GCM/NoPadding\")) { \"Must use AES/GCM/NoPadding\" }\n\n    val key = ByteArray(16).also { SecureRandom().nextBytes(it) }\n    val vault = ClearingRegistry(key)\n    val msg = \"routing=021000021;acct=998877\".toByteArray()\n    val c1 = vault.encrypt(msg)\n    val c2 = vault.encrypt(msg)\n    assert(!c1.contentEquals(c2)) { \"Ciphertext must use fresh random IV!\" }\n    assert(vault.decrypt(c1).contentEquals(msg))\n\n    val tampered = c1.copyOf()\n    tampered[tampered.lastIndex] = (tampered.last().toInt() xor 0xFF).toByte()\n    var authFailed = false\n    try {\n        vault.decrypt(tampered)\n    } catch (_: Exception) {\n        authFailed = true\n    }\n    assert(authFailed) { \"GCM tag verification must reject tampered ciphertext!\" }\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "c_sys_002_32e515",
+    "category": "c_systems",
+    "spec": "Create `rwmap.c` implementing a thread-safe bounded ring buffer of capacity 16 using `pthread_mutex_t` and `pthread_cond_t`, plus a `main()` spawning 4 producer and 4 consumer threads (150 items per producer) verifying exact sum with `assert`, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "kt_conc_003_889ddb",
+    "category": "kotlin_concurrency",
+    "spec": "Create `Main.kt` implementing a thread-safe `WireCircuitBreaker(failureThreshold = 3, cooldownMs = 30L)` using `ReentrantLock` (`try { ... } finally { lock.unlock() }`). In `Main.kt`, use `Thread { ... }` and `assert(condition)` (do NOT import `kotlin.test.*`) to verify CLOSED -> OPEN after 3 failures, rejection while OPEN, transition to HALF_OPEN after cooldown, and concurrent calls across 4 threads, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "ndk_cpp_003_1d8a95",
+    "category": "ndk_cpp_cmake",
+    "spec": "Create `CMakeLists.txt`, `bio_cache.hpp`, `bio_cache.cpp`, and `test_bio_cache.cpp` implementing a thread-safe C++17 `NativeRingCache` (capacity 32) guarded by `std::mutex` and `std::lock_guard`, with `ctest` verifying 8 concurrent threads and printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "masvs_003_c60f82",
+    "category": "owasp_masvs",
+    "spec": "Remediate the OWASP MASVS-STORAGE insecure SharedPreferences/PII logging flaw in `AccountQueue.kt`: encrypt stored preference values (never persist plaintext PAN/PIN/tokens to disk) and redact sensitive tokens in `auditSummary()`, passing all assertions in `Main.kt`.",
+    "workspace_files": {
+      "AccountQueue.kt": "import java.io.File\n\nclass AccountQueue(private val prefsFile: File, private val masterKey: ByteArray) {\n    private val entries = linkedMapOf<String, String>()\n\n    fun putSecret(key: String, secretValue: String) {\n        entries[key] = secretValue\n        prefsFile.writeText(entries.entries.joinToString(\"\\n\") { \"${it.key}=${it.value}\" })\n    }\n\n    fun getSecret(key: String): String? = entries[key]\n\n    fun auditSummary(): String {\n        return entries.entries.joinToString(\", \") { \"${it.key}=${it.value}\" }\n    }\n}\n",
+      "Main.kt": "import java.io.File\nimport java.nio.file.Files\nimport java.security.SecureRandom\n\nfun main() {\n    val f = Files.createTempFile(\"secure_prefs_\", \".dat\").toFile()\n    val key = ByteArray(16).also { SecureRandom().nextBytes(it) }\n    val store = AccountQueue(f, key)\n    val pan = \"4111222233334444\"\n    store.putSecret(\"card_pan\", pan)\n    assert(store.getSecret(\"card_pan\") == pan)\n    val disk = f.readText()\n    assert(!disk.contains(pan)) { \"Plaintext PAN persisted on disk!\" }\n    val summary = store.auditSummary()\n    assert(!summary.contains(pan)) { \"Plaintext PAN leaked in auditSummary!\" }\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "c_sys_003_a3a953",
+    "category": "c_systems",
+    "spec": "Create `workq.c` implementing a thread-safe concurrent integer hash table or bucket counter with per-bucket `pthread_mutex_t` locks, plus a `main()` spawning 4 threads inserting 150 keys each and verifying total count == 600 with `assert`, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "kt_conc_004_fe4778",
+    "category": "kotlin_concurrency",
+    "spec": "Fix the race condition in `EscrowAccumulator.kt` by guarding shared state with `ReentrantLock` (using `try { ... } finally { lock.unlock() }`). Do NOT modify the test invariants in `Main.kt`, and do NOT import `kotlin.test.*`. Ensure `compile_and_test` prints 'ALL TESTS PASSED'.",
+    "workspace_files": {
+      "EscrowAccumulator.kt": "class EscrowAccumulator {\n    private var balance: Long = 0L\n    private val entries = mutableListOf<String>()\n\n    fun record(tag: String, amount: Long) {\n        val next = balance + amount\n        Thread.yield()\n        balance = next\n        entries.add(tag)\n    }\n\n    fun totalBalance(): Long = balance\n    fun entryCount(): Int = entries.size\n}\n",
+      "Main.kt": "import java.util.concurrent.CountDownLatch\n\nfun main() {\n    val acc = EscrowAccumulator()\n    val start = CountDownLatch(1)\n    val workers = (0 until 4).map { tid ->\n        Thread {\n            start.await()\n            for (i in 0 until 150) {\n                acc.record(\"t$tid-$i\", 1L)\n            }\n        }\n    }\n    workers.forEach { it.start() }\n    start.countDown()\n    workers.forEach { it.join() }\n    assert(acc.totalBalance() == 600L) { \"Expected 600, got ${acc.totalBalance()}\" }\n    assert(acc.entryCount() == 600) { \"Expected 600 entries, got ${acc.entryCount()}\" }\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "ndk_cpp_004_ff27d9",
+    "category": "ndk_cpp_cmake",
+    "spec": "Fix the `CMakeLists.txt` build failure and C++17 `std::mutex` bug in `audit_ring.hpp`/`audit_ring.cpp` so `cmake` builds and `ctest` passes with zero warnings/deadlocks.",
+    "workspace_files": {
+      "CMakeLists.txt": "cmake_minimum_required(VERSION 3.16)\nproject(audit_ring_proj LANGUAGES CXX)\nenable_testing()\n# BUG: missing C++17 standard and Threads link, and test_audit_ring.cpp omitted\nadd_executable(test_audit_ring audit_ring.cpp)\nadd_test(NAME audit_ring_suite COMMAND test_audit_ring)\n",
+      "audit_ring.hpp": "#pragma once\n#include <mutex>\n#include <vector>\n#include <cstdint>\n\nclass NativeSessionBuffer {\npublic:\n    explicit NativeSessionBuffer(std::size_t cap) : cap_(cap) {}\n    bool push_token(int64_t val);\n    std::size_t size() const;\n    int64_t sum() const;\nprivate:\n    std::size_t cap_;\n    mutable std::mutex mu_;\n    std::vector<int64_t> data_;\n};\n",
+      "audit_ring.cpp": "#include \"audit_ring.hpp\"\n#include <numeric>\n\nbool NativeSessionBuffer::push_token(int64_t val) {\n    std::lock_guard<std::mutex> lock(mu_);\n    if (size() >= cap_) {  // BUG: self-deadlock calling size() while holding non-recursive mu_\n        return false;\n    }\n    data_.push_back(val);\n    return true;\n}\n\nstd::size_t NativeSessionBuffer::size() const {\n    std::lock_guard<std::mutex> lock(mu_);\n    return data_.size();\n}\n\nint64_t NativeSessionBuffer::sum() const {\n    std::lock_guard<std::mutex> lock(mu_);\n    return std::accumulate(data_.begin(), data_.end(), int64_t{0});\n}\n",
+      "test_audit_ring.cpp": "#include \"audit_ring.hpp\"\n#include <cassert>\n#include <iostream>\n#include <thread>\n#include <vector>\n\nint main() {\n    NativeSessionBuffer buf(64);\n    std::vector<std::thread> pool;\n    for (int t = 0; t < 6; ++t) {\n        pool.emplace_back([&buf]() {\n            for (int i = 0; i < 4; ++i) {\n                buf.push_token(1);\n            }\n        });\n    }\n    for (auto& th : pool) th.join();\n    assert(buf.size() == static_cast<std::size_t>(24));\n    assert(buf.sum() == 24);\n    std::cout << \"ALL TESTS PASSED\\n\";\n    return 0;\n}\n"
+    }
+  },
+  {
+    "id": "masvs_004_235b5f",
+    "category": "owasp_masvs",
+    "spec": "Remediate the OWASP MASVS-STORAGE hardcoded secret vulnerability in `ClearingPool.kt`: remove the hardcoded signing secret, require an injected/environment secret provider (throwing `IllegalStateException` if blank), use HMAC-SHA256 with constant-time `MessageDigest.isEqual`, and make `verifyToken` pass all assertions in `Main.kt` (do NOT import `kotlin.test.*`).",
+    "workspace_files": {
+      "ClearingPool.kt": "class ClearingPool(private val keyProvider: () -> ByteArray = { ByteArray(0) }) {\n    companion object {\n        private const val HARDCODED_SECRET = \"sk_live_488162_clearing\"\n    }\n\n    fun signToken(payload: String): ByteArray {\n        return (HARDCODED_SECRET + \":\" + payload).toByteArray(Charsets.UTF_8)\n    }\n\n    fun verifyToken(payload: String, sig: ByteArray): Boolean {\n        return signToken(payload).contentEquals(sig)\n    }\n}\n",
+      "Main.kt": "import java.io.File\n\nfun main() {\n    val src = File(\"ClearingPool.kt\").readText()\n    assert(!src.contains(\"sk_live_488162_clearing\")) { \"Hardcoded secret still present!\" }\n    assert(!src.contains(\"HARDCODED_SECRET\")) { \"Hardcoded constant still present!\" }\n\n    var failedEmpty = false\n    try {\n        ClearingPool { ByteArray(0) }.signToken(\"acct=42\")\n    } catch (_: IllegalStateException) {\n        failedEmpty = true\n    }\n    assert(failedEmpty) { \"Blank key must throw IllegalStateException\" }\n\n    val key = \"bank-rotated-ephemeral-key-32bytes\".toByteArray()\n    val store = ClearingPool { key }\n    val sig = store.signToken(\"acct=42\")\n    assert(store.verifyToken(\"acct=42\", sig))\n    assert(!store.verifyToken(\"acct=99\", sig))\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "c_sys_004_30fa17",
+    "category": "c_systems",
+    "spec": "Create `barrier.c` implementing a thread-safe bounded ring buffer of capacity 16 using `pthread_mutex_t` and `pthread_cond_t`, plus a `main()` spawning 4 producer and 4 consumer threads (150 items per producer) verifying exact sum with `assert`, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "kt_conc_005_0233c5",
+    "category": "kotlin_concurrency",
+    "spec": "Fix `TokenBoundedPool.kt` so `acquire()` and `release()` are thread-safe and properly block when empty/full using `ReentrantLock` and `Condition` (`try { ... } finally { lock.unlock() }`), avoiding lost wakeups (`signalAll()`). Do NOT import `kotlin.test.*`. Verify `Main.kt` prints 'ALL TESTS PASSED'.",
+    "workspace_files": {
+      "TokenBoundedPool.kt": "import java.util.ArrayDeque\n\nclass TokenBoundedPool(private val capacity: Int) {\n    private val items = ArrayDeque<Int>((0 until capacity).toList())\n\n    fun acquire(): Int {\n        if (items.isEmpty()) {\n            throw IllegalStateException(\"Pool exhausted without blocking\")\n        }\n        return items.removeFirst()\n    }\n\n    fun release(item: Int) {\n        items.addLast(item)\n    }\n}\n",
+      "Main.kt": "import java.util.concurrent.atomic.AtomicInteger\n\nfun main() {\n    val pool = TokenBoundedPool(4)\n    val completed = AtomicInteger(0)\n    val active = AtomicInteger(0)\n    val maxSeen = AtomicInteger(0)\n    val workers = (0 until 8).map {\n        Thread {\n            for (i in 0 until 25) {\n                val slot = pool.acquire()\n                val cur = active.incrementAndGet()\n                maxSeen.accumulateAndGet(cur, Math::max)\n                Thread.sleep(1)\n                active.decrementAndGet()\n                pool.release(slot)\n                completed.incrementAndGet()\n            }\n        }\n    }\n    workers.forEach { it.start() }\n    workers.forEach { it.join() }\n    assert(completed.get() == 200) { \"Completed=${completed.get()}\" }\n    assert(maxSeen.get() <= 4) { \"Exceeded capacity: ${maxSeen.get()}\" }\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "ndk_cpp_005_70b963",
+    "category": "ndk_cpp_cmake",
+    "spec": "Fix the JNI-style UTF-8 C++17 buffer truncation/off-by-one and `std::mutex` race in `crypto_buf.hpp`/`crypto_buf.cpp` and ensure `CMakeLists.txt` builds and passes `ctest` across 4 threads.",
+    "workspace_files": {
+      "CMakeLists.txt": "cmake_minimum_required(VERSION 3.16)\nproject(crypto_buf_jni LANGUAGES CXX)\nset(CMAKE_CXX_STANDARD 17)\nset(CMAKE_CXX_STANDARD_REQUIRED ON)\nenable_testing()\nfind_package(Threads REQUIRED)\nadd_executable(test_crypto_buf crypto_buf.cpp test_crypto_buf.cpp)\ntarget_link_libraries(test_crypto_buf PRIVATE Threads::Threads)\nadd_test(NAME crypto_buf_jni_test COMMAND test_crypto_buf)\n",
+      "crypto_buf.hpp": "#pragma once\n#include <mutex>\n#include <string>\n\nclass JniStringSlot {\npublic:\n    void set(const char* src);\n    std::string get() const;\n\nprivate:\n    mutable std::mutex mu_;\n    char buf_[32] = {0};\n};\n",
+      "crypto_buf.cpp": "#include \"crypto_buf.hpp\"\n#include <cstring>\n\nvoid JniStringSlot::set(const char* src) {\n    // BUG: missing mutex lock and off-by-one null terminator copy\n    if (!src) return;\n    std::size_t n = std::strlen(src);\n    if (n > sizeof(buf_)) n = sizeof(buf_);\n    std::memcpy(buf_, src, n);\n}\n\nstd::string JniStringSlot::get() const {\n    return std::string(buf_);\n}\n",
+      "test_crypto_buf.cpp": "#include \"crypto_buf.hpp\"\n#include <cassert>\n#include <iostream>\n#include <thread>\n#include <vector>\n\nint main() {\n    JniStringSlot slot;\n    std::string long_input(64, 'A');\n    slot.set(long_input.c_str());\n    assert(slot.get().size() == 31);\n\n    std::vector<std::thread> workers;\n    for (int t = 0; t < 4; ++t) {\n        workers.emplace_back([&slot, t]() {\n            for (int i = 0; i < 400; ++i) {\n                std::string s = \"token_\" + std::to_string(t);\n                slot.set(s.c_str());\n                assert(!slot.get().empty());\n            }\n        });\n    }\n    for (auto& w : workers) w.join();\n    std::cout << \"ALL TESTS PASSED\\n\";\n    return 0;\n}\n"
+    }
+  },
+  {
+    "id": "masvs_005_1a3aad",
+    "category": "owasp_masvs",
+    "spec": "Remediate the OWASP MASVS-STORAGE / path-traversal vulnerability in `EscrowQueue.kt`: enforce strict `canonicalPath` sandbox jailing inside `rootDir` (rejecting absolute paths, `../` traversal, and symlinks escaping `rootDir` with `SecurityException`), and ensure all assertions in `Main.kt` pass.",
+    "workspace_files": {
+      "EscrowQueue.kt": "import java.io.File\n\nclass EscrowQueue(private val rootDir: File) {\n    init { rootDir.mkdirs() }\n\n    fun readEntry(relPath: String): String {\n        val target = File(rootDir, relPath)\n        return target.readText(Charsets.UTF_8)\n    }\n\n    fun writeEntry(relPath: String, content: String) {\n        val target = File(rootDir, relPath)\n        target.parentFile?.mkdirs()\n        target.writeText(content, Charsets.UTF_8)\n    }\n}\n",
+      "Main.kt": "import java.io.File\nimport java.nio.file.Files\n\nfun main() {\n    val tmp = Files.createTempDirectory(\"masvs_jail_\").toFile()\n    val outside = Files.createTempFile(\"masvs_secret_\", \".txt\").toFile()\n    outside.writeText(\"TOP_SECRET_BANK_KEY\")\n    val sandbox = File(tmp, \"sandbox\")\n    val store = EscrowQueue(sandbox)\n    store.writeEntry(\"ok.txt\", \"safe-payload\")\n    assert(store.readEntry(\"ok.txt\") == \"safe-payload\")\n\n    var blockedTraversal = false\n    try {\n        store.readEntry(\"../\" + outside.name)\n    } catch (_: SecurityException) {\n        blockedTraversal = true\n    }\n    assert(blockedTraversal) { \"Path traversal was not blocked!\" }\n\n    var blockedAbs = false\n    try {\n        store.readEntry(outside.absolutePath)\n    } catch (_: SecurityException) {\n        blockedAbs = true\n    }\n    assert(blockedAbs) { \"Absolute path escape was not blocked!\" }\n\n    val sym = File(sandbox, \"escape_link.txt\").toPath()\n    Files.createSymbolicLink(sym, outside.toPath())\n    var blockedSymlink = false\n    try {\n        store.readEntry(\"escape_link.txt\")\n    } catch (_: SecurityException) {\n        blockedSymlink = true\n    }\n    assert(blockedSymlink) { \"Symlink escape was not blocked!\" }\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "c_sys_005_cfcf49",
+    "category": "c_systems",
+    "spec": "Create `barrier.c` implementing a thread-safe concurrent integer hash table or bucket counter with per-bucket `pthread_mutex_t` locks, plus a `main()` spawning 4 threads inserting 50 keys each and verifying total count == 200 with `assert`, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "kt_conc_006_a339c7",
+    "category": "kotlin_concurrency",
+    "spec": "Create `Main.kt` implementing a thread-safe single-lane `ClearingDispatcher` coroutine-style task serializer using `ReentrantLock` (`try { ... } finally { lock.unlock() }`) and a `Condition` worker queue so `submit(task)` executes tasks strictly FIFO without concurrent overlap. In `Main.kt`, use `Thread { ... }` and `assert(condition)` (do NOT import `kotlin.test.*` or `kotlinx.coroutines`) to verify 6 threads x 200 tasks complete in-order with zero overlap, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "ndk_cpp_006_32018c",
+    "category": "ndk_cpp_cmake",
+    "spec": "Fix the lock-ordering deadlock and `CMakeLists.txt` C++17 standard in `crypto_buf.hpp`/`crypto_buf.cpp` and `CMakeLists.txt` using `std::scoped_lock` across dual account transfers so `ctest` passes.",
+    "workspace_files": {
+      "CMakeLists.txt": "cmake_minimum_required(VERSION 3.16)\nproject(crypto_buf_ledger LANGUAGES CXX)\nset(CMAKE_CXX_STANDARD 14)\nset(CMAKE_CXX_STANDARD_REQUIRED ON)\nenable_testing()\nfind_package(Threads REQUIRED)\nadd_executable(test_crypto_buf crypto_buf.cpp test_crypto_buf.cpp)\ntarget_link_libraries(test_crypto_buf PRIVATE Threads::Threads)\nadd_test(NAME crypto_buf_deadlock_test COMMAND test_crypto_buf)\n",
+      "crypto_buf.hpp": "#pragma once\n#include <cstdint>\n#include <mutex>\n\nstruct NativeAccount {\n    std::mutex mu;\n    int64_t balance{1000};\n};\n\nbool transfer(NativeAccount& from, NativeAccount& to, int64_t amount);\n",
+      "crypto_buf.cpp": "#include \"crypto_buf.hpp\"\n\nbool transfer(NativeAccount& from, NativeAccount& to, int64_t amount) {\n    if (&from == &to || amount <= 0) return false;\n    // BUG: locks in caller order -> AB/BA deadlock under concurrent opposite transfers\n    std::lock_guard<std::mutex> g1(from.mu);\n    std::lock_guard<std::mutex> g2(to.mu);\n    if (from.balance < amount) return false;\n    from.balance -= amount;\n    to.balance += amount;\n    return true;\n}\n",
+      "test_crypto_buf.cpp": "#include \"crypto_buf.hpp\"\n#include <cassert>\n#include <iostream>\n#include <thread>\n\nint main() {\n    NativeAccount a, b;\n    std::thread t1([&]() {\n        for (int i = 0; i < 500; ++i) transfer(a, b, 1);\n    });\n    std::thread t2([&]() {\n        for (int i = 0; i < 500; ++i) transfer(b, a, 1);\n    });\n    t1.join();\n    t2.join();\n    assert(a.balance + b.balance == 2000);\n    std::cout << \"ALL TESTS PASSED\\n\";\n    return 0;\n}\n"
+    }
+  },
+  {
+    "id": "masvs_006_038111",
+    "category": "owasp_masvs",
+    "spec": "Remediate the OWASP MASVS-CRYPTO vulnerability in `TreasuryRouter.kt`: replace `AES/ECB/PKCS5Padding` and static zero IV with `AES/GCM/NoPadding` using a fresh 12-byte `SecureRandom` IV per encryption and 128-bit authentication tag, storing `iv || ciphertext` so `Main.kt` assertions pass.",
+    "workspace_files": {
+      "TreasuryRouter.kt": "import javax.crypto.Cipher\nimport javax.crypto.spec.SecretKeySpec\n\nclass TreasuryRouter(private val rawKey: ByteArray) {\n    fun encrypt(plaintext: ByteArray): ByteArray {\n        val cipher = Cipher.getInstance(\"AES/ECB/PKCS5Padding\")\n        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(rawKey, \"AES\"))\n        return cipher.doFinal(plaintext)\n    }\n\n    fun decrypt(ciphertext: ByteArray): ByteArray {\n        val cipher = Cipher.getInstance(\"AES/ECB/PKCS5Padding\")\n        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(rawKey, \"AES\"))\n        return cipher.doFinal(ciphertext)\n    }\n}\n",
+      "Main.kt": "import java.io.File\nimport java.security.SecureRandom\n\nfun main() {\n    val src = File(\"TreasuryRouter.kt\").readText()\n    assert(!src.contains(\"AES/ECB\")) { \"Insecure AES/ECB still used!\" }\n    assert(src.contains(\"AES/GCM/NoPadding\")) { \"Must use AES/GCM/NoPadding\" }\n\n    val key = ByteArray(16).also { SecureRandom().nextBytes(it) }\n    val vault = TreasuryRouter(key)\n    val msg = \"routing=021000021;acct=998877\".toByteArray()\n    val c1 = vault.encrypt(msg)\n    val c2 = vault.encrypt(msg)\n    assert(!c1.contentEquals(c2)) { \"Ciphertext must use fresh random IV!\" }\n    assert(vault.decrypt(c1).contentEquals(msg))\n\n    val tampered = c1.copyOf()\n    tampered[tampered.lastIndex] = (tampered.last().toInt() xor 0xFF).toByte()\n    var authFailed = false\n    try {\n        vault.decrypt(tampered)\n    } catch (_: Exception) {\n        authFailed = true\n    }\n    assert(authFailed) { \"GCM tag verification must reject tampered ciphertext!\" }\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "c_sys_006_d20567",
+    "category": "c_systems",
+    "spec": "Create `timerq.c` implementing a thread-safe bounded ring buffer of capacity 8 using `pthread_mutex_t` and `pthread_cond_t`, plus a `main()` spawning 8 producer and 8 consumer threads (100 items per producer) verifying exact sum with `assert`, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "kt_conc_007_8c22d8",
+    "category": "kotlin_concurrency",
+    "spec": "Create `Main.kt` implementing a thread-safe `EscrowCircuitBreaker(failureThreshold = 5, cooldownMs = 30L)` using `ReentrantLock` (`try { ... } finally { lock.unlock() }`). In `Main.kt`, use `Thread { ... }` and `assert(condition)` (do NOT import `kotlin.test.*`) to verify CLOSED -> OPEN after 5 failures, rejection while OPEN, transition to HALF_OPEN after cooldown, and concurrent calls across 4 threads, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "ndk_cpp_007_ccff98",
+    "category": "ndk_cpp_cmake",
+    "spec": "Create `CMakeLists.txt`, `audit_ring.hpp`, `audit_ring.cpp`, and `test_audit_ring.cpp` implementing a thread-safe C++17 `NativeRingCache` (capacity 32) guarded by `std::mutex` and `std::lock_guard`, with `ctest` verifying 8 concurrent threads and printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "masvs_007_556b31",
+    "category": "owasp_masvs",
+    "spec": "Remediate the OWASP MASVS-STORAGE insecure SharedPreferences/PII logging flaw in `TreasuryPool.kt`: encrypt stored preference values (never persist plaintext PAN/PIN/tokens to disk) and redact sensitive tokens in `auditSummary()`, passing all assertions in `Main.kt`.",
+    "workspace_files": {
+      "TreasuryPool.kt": "import java.io.File\n\nclass TreasuryPool(private val prefsFile: File, private val masterKey: ByteArray) {\n    private val entries = linkedMapOf<String, String>()\n\n    fun putSecret(key: String, secretValue: String) {\n        entries[key] = secretValue\n        prefsFile.writeText(entries.entries.joinToString(\"\\n\") { \"${it.key}=${it.value}\" })\n    }\n\n    fun getSecret(key: String): String? = entries[key]\n\n    fun auditSummary(): String {\n        return entries.entries.joinToString(\", \") { \"${it.key}=${it.value}\" }\n    }\n}\n",
+      "Main.kt": "import java.io.File\nimport java.nio.file.Files\nimport java.security.SecureRandom\n\nfun main() {\n    val f = Files.createTempFile(\"secure_prefs_\", \".dat\").toFile()\n    val key = ByteArray(16).also { SecureRandom().nextBytes(it) }\n    val store = TreasuryPool(f, key)\n    val pan = \"4111222233334444\"\n    store.putSecret(\"card_pan\", pan)\n    assert(store.getSecret(\"card_pan\") == pan)\n    val disk = f.readText()\n    assert(!disk.contains(pan)) { \"Plaintext PAN persisted on disk!\" }\n    val summary = store.auditSummary()\n    assert(!summary.contains(pan)) { \"Plaintext PAN leaked in auditSummary!\" }\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "c_sys_007_b3c6cb",
+    "category": "c_systems",
+    "spec": "Create `sempool.c` implementing a thread-safe concurrent integer hash table or bucket counter with per-bucket `pthread_mutex_t` locks, plus a `main()` spawning 4 threads inserting 50 keys each and verifying total count == 200 with `assert`, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "kt_conc_008_d56c61",
+    "category": "kotlin_concurrency",
+    "spec": "Fix the race condition in `SettlementAccumulator.kt` by guarding shared state with `ReentrantLock` (using `try { ... } finally { lock.unlock() }`). Do NOT modify the test invariants in `Main.kt`, and do NOT import `kotlin.test.*`. Ensure `compile_and_test` prints 'ALL TESTS PASSED'.",
+    "workspace_files": {
+      "SettlementAccumulator.kt": "class SettlementAccumulator {\n    private var balance: Long = 0L\n    private val entries = mutableListOf<String>()\n\n    fun record(tag: String, amount: Long) {\n        val next = balance + amount\n        Thread.yield()\n        balance = next\n        entries.add(tag)\n    }\n\n    fun totalBalance(): Long = balance\n    fun entryCount(): Int = entries.size\n}\n",
+      "Main.kt": "import java.util.concurrent.CountDownLatch\n\nfun main() {\n    val acc = SettlementAccumulator()\n    val start = CountDownLatch(1)\n    val workers = (0 until 8).map { tid ->\n        Thread {\n            start.await()\n            for (i in 0 until 150) {\n                acc.record(\"t$tid-$i\", 1L)\n            }\n        }\n    }\n    workers.forEach { it.start() }\n    start.countDown()\n    workers.forEach { it.join() }\n    assert(acc.totalBalance() == 1200L) { \"Expected 1200, got ${acc.totalBalance()}\" }\n    assert(acc.entryCount() == 1200) { \"Expected 1200 entries, got ${acc.entryCount()}\" }\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "ndk_cpp_008_47c2ed",
+    "category": "ndk_cpp_cmake",
+    "spec": "Fix the `CMakeLists.txt` build failure and C++17 `std::mutex` bug in `native_vault.hpp`/`native_vault.cpp` so `cmake` builds and `ctest` passes with zero warnings/deadlocks.",
+    "workspace_files": {
+      "CMakeLists.txt": "cmake_minimum_required(VERSION 3.16)\nproject(native_vault_proj LANGUAGES CXX)\nenable_testing()\n# BUG: missing C++17 standard and Threads link, and test_native_vault.cpp omitted\nadd_executable(test_native_vault native_vault.cpp)\nadd_test(NAME native_vault_suite COMMAND test_native_vault)\n",
+      "native_vault.hpp": "#pragma once\n#include <mutex>\n#include <vector>\n#include <cstdint>\n\nclass NativeSessionBuffer {\npublic:\n    explicit NativeSessionBuffer(std::size_t cap) : cap_(cap) {}\n    bool push_token(int64_t val);\n    std::size_t size() const;\n    int64_t sum() const;\nprivate:\n    std::size_t cap_;\n    mutable std::mutex mu_;\n    std::vector<int64_t> data_;\n};\n",
+      "native_vault.cpp": "#include \"native_vault.hpp\"\n#include <numeric>\n\nbool NativeSessionBuffer::push_token(int64_t val) {\n    std::lock_guard<std::mutex> lock(mu_);\n    if (size() >= cap_) {  // BUG: self-deadlock calling size() while holding non-recursive mu_\n        return false;\n    }\n    data_.push_back(val);\n    return true;\n}\n\nstd::size_t NativeSessionBuffer::size() const {\n    std::lock_guard<std::mutex> lock(mu_);\n    return data_.size();\n}\n\nint64_t NativeSessionBuffer::sum() const {\n    std::lock_guard<std::mutex> lock(mu_);\n    return std::accumulate(data_.begin(), data_.end(), int64_t{0});\n}\n",
+      "test_native_vault.cpp": "#include \"native_vault.hpp\"\n#include <cassert>\n#include <iostream>\n#include <thread>\n#include <vector>\n\nint main() {\n    NativeSessionBuffer buf(64);\n    std::vector<std::thread> pool;\n    for (int t = 0; t < 6; ++t) {\n        pool.emplace_back([&buf]() {\n            for (int i = 0; i < 4; ++i) {\n                buf.push_token(1);\n            }\n        });\n    }\n    for (auto& th : pool) th.join();\n    assert(buf.size() == static_cast<std::size_t>(24));\n    assert(buf.sum() == 24);\n    std::cout << \"ALL TESTS PASSED\\n\";\n    return 0;\n}\n"
+    }
+  },
+  {
+    "id": "masvs_008_565c1c",
+    "category": "owasp_masvs",
+    "spec": "Remediate the OWASP MASVS-STORAGE hardcoded secret vulnerability in `RemittanceCache.kt`: remove the hardcoded signing secret, require an injected/environment secret provider (throwing `IllegalStateException` if blank), use HMAC-SHA256 with constant-time `MessageDigest.isEqual`, and make `verifyToken` pass all assertions in `Main.kt` (do NOT import `kotlin.test.*`).",
+    "workspace_files": {
+      "RemittanceCache.kt": "class RemittanceCache(private val keyProvider: () -> ByteArray = { ByteArray(0) }) {\n    companion object {\n        private const val HARDCODED_SECRET = \"sk_live_680099_remittance\"\n    }\n\n    fun signToken(payload: String): ByteArray {\n        return (HARDCODED_SECRET + \":\" + payload).toByteArray(Charsets.UTF_8)\n    }\n\n    fun verifyToken(payload: String, sig: ByteArray): Boolean {\n        return signToken(payload).contentEquals(sig)\n    }\n}\n",
+      "Main.kt": "import java.io.File\n\nfun main() {\n    val src = File(\"RemittanceCache.kt\").readText()\n    assert(!src.contains(\"sk_live_680099_remittance\")) { \"Hardcoded secret still present!\" }\n    assert(!src.contains(\"HARDCODED_SECRET\")) { \"Hardcoded constant still present!\" }\n\n    var failedEmpty = false\n    try {\n        RemittanceCache { ByteArray(0) }.signToken(\"acct=42\")\n    } catch (_: IllegalStateException) {\n        failedEmpty = true\n    }\n    assert(failedEmpty) { \"Blank key must throw IllegalStateException\" }\n\n    val key = \"bank-rotated-ephemeral-key-32bytes\".toByteArray()\n    val store = RemittanceCache { key }\n    val sig = store.signToken(\"acct=42\")\n    assert(store.verifyToken(\"acct=42\", sig))\n    assert(!store.verifyToken(\"acct=99\", sig))\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "c_sys_008_d8f23c",
+    "category": "c_systems",
+    "spec": "Create `ringbuf.c` implementing a thread-safe bounded ring buffer of capacity 8 using `pthread_mutex_t` and `pthread_cond_t`, plus a `main()` spawning 8 producer and 8 consumer threads (150 items per producer) verifying exact sum with `assert`, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "kt_conc_009_18d73a",
+    "category": "kotlin_concurrency",
+    "spec": "Fix `CardBoundedPool.kt` so `acquire()` and `release()` are thread-safe and properly block when empty/full using `ReentrantLock` and `Condition` (`try { ... } finally { lock.unlock() }`), avoiding lost wakeups (`signalAll()`). Do NOT import `kotlin.test.*`. Verify `Main.kt` prints 'ALL TESTS PASSED'.",
+    "workspace_files": {
+      "CardBoundedPool.kt": "import java.util.ArrayDeque\n\nclass CardBoundedPool(private val capacity: Int) {\n    private val items = ArrayDeque<Int>((0 until capacity).toList())\n\n    fun acquire(): Int {\n        if (items.isEmpty()) {\n            throw IllegalStateException(\"Pool exhausted without blocking\")\n        }\n        return items.removeFirst()\n    }\n\n    fun release(item: Int) {\n        items.addLast(item)\n    }\n}\n",
+      "Main.kt": "import java.util.concurrent.atomic.AtomicInteger\n\nfun main() {\n    val pool = CardBoundedPool(5)\n    val completed = AtomicInteger(0)\n    val active = AtomicInteger(0)\n    val maxSeen = AtomicInteger(0)\n    val workers = (0 until 8).map {\n        Thread {\n            for (i in 0 until 25) {\n                val slot = pool.acquire()\n                val cur = active.incrementAndGet()\n                maxSeen.accumulateAndGet(cur, Math::max)\n                Thread.sleep(1)\n                active.decrementAndGet()\n                pool.release(slot)\n                completed.incrementAndGet()\n            }\n        }\n    }\n    workers.forEach { it.start() }\n    workers.forEach { it.join() }\n    assert(completed.get() == 200) { \"Completed=${completed.get()}\" }\n    assert(maxSeen.get() <= 5) { \"Exceeded capacity: ${maxSeen.get()}\" }\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "ndk_cpp_009_74b151",
+    "category": "ndk_cpp_cmake",
+    "spec": "Fix the JNI-style UTF-8 C++17 buffer truncation/off-by-one and `std::mutex` race in `native_vault.hpp`/`native_vault.cpp` and ensure `CMakeLists.txt` builds and passes `ctest` across 6 threads.",
+    "workspace_files": {
+      "CMakeLists.txt": "cmake_minimum_required(VERSION 3.16)\nproject(native_vault_jni LANGUAGES CXX)\nset(CMAKE_CXX_STANDARD 17)\nset(CMAKE_CXX_STANDARD_REQUIRED ON)\nenable_testing()\nfind_package(Threads REQUIRED)\nadd_executable(test_native_vault native_vault.cpp test_native_vault.cpp)\ntarget_link_libraries(test_native_vault PRIVATE Threads::Threads)\nadd_test(NAME native_vault_jni_test COMMAND test_native_vault)\n",
+      "native_vault.hpp": "#pragma once\n#include <mutex>\n#include <string>\n\nclass JniStringSlot {\npublic:\n    void set(const char* src);\n    std::string get() const;\n\nprivate:\n    mutable std::mutex mu_;\n    char buf_[32] = {0};\n};\n",
+      "native_vault.cpp": "#include \"native_vault.hpp\"\n#include <cstring>\n\nvoid JniStringSlot::set(const char* src) {\n    // BUG: missing mutex lock and off-by-one null terminator copy\n    if (!src) return;\n    std::size_t n = std::strlen(src);\n    if (n > sizeof(buf_)) n = sizeof(buf_);\n    std::memcpy(buf_, src, n);\n}\n\nstd::string JniStringSlot::get() const {\n    return std::string(buf_);\n}\n",
+      "test_native_vault.cpp": "#include \"native_vault.hpp\"\n#include <cassert>\n#include <iostream>\n#include <thread>\n#include <vector>\n\nint main() {\n    JniStringSlot slot;\n    std::string long_input(64, 'A');\n    slot.set(long_input.c_str());\n    assert(slot.get().size() == 31);\n\n    std::vector<std::thread> workers;\n    for (int t = 0; t < 6; ++t) {\n        workers.emplace_back([&slot, t]() {\n            for (int i = 0; i < 400; ++i) {\n                std::string s = \"token_\" + std::to_string(t);\n                slot.set(s.c_str());\n                assert(!slot.get().empty());\n            }\n        });\n    }\n    for (auto& w : workers) w.join();\n    std::cout << \"ALL TESTS PASSED\\n\";\n    return 0;\n}\n"
+    }
+  },
+  {
+    "id": "masvs_009_e94368",
+    "category": "owasp_masvs",
+    "spec": "Remediate the OWASP MASVS-STORAGE / path-traversal vulnerability in `RemittanceGuard.kt`: enforce strict `canonicalPath` sandbox jailing inside `rootDir` (rejecting absolute paths, `../` traversal, and symlinks escaping `rootDir` with `SecurityException`), and ensure all assertions in `Main.kt` pass.",
+    "workspace_files": {
+      "RemittanceGuard.kt": "import java.io.File\n\nclass RemittanceGuard(private val rootDir: File) {\n    init { rootDir.mkdirs() }\n\n    fun readEntry(relPath: String): String {\n        val target = File(rootDir, relPath)\n        return target.readText(Charsets.UTF_8)\n    }\n\n    fun writeEntry(relPath: String, content: String) {\n        val target = File(rootDir, relPath)\n        target.parentFile?.mkdirs()\n        target.writeText(content, Charsets.UTF_8)\n    }\n}\n",
+      "Main.kt": "import java.io.File\nimport java.nio.file.Files\n\nfun main() {\n    val tmp = Files.createTempDirectory(\"masvs_jail_\").toFile()\n    val outside = Files.createTempFile(\"masvs_secret_\", \".txt\").toFile()\n    outside.writeText(\"TOP_SECRET_BANK_KEY\")\n    val sandbox = File(tmp, \"sandbox\")\n    val store = RemittanceGuard(sandbox)\n    store.writeEntry(\"ok.txt\", \"safe-payload\")\n    assert(store.readEntry(\"ok.txt\") == \"safe-payload\")\n\n    var blockedTraversal = false\n    try {\n        store.readEntry(\"../\" + outside.name)\n    } catch (_: SecurityException) {\n        blockedTraversal = true\n    }\n    assert(blockedTraversal) { \"Path traversal was not blocked!\" }\n\n    var blockedAbs = false\n    try {\n        store.readEntry(outside.absolutePath)\n    } catch (_: SecurityException) {\n        blockedAbs = true\n    }\n    assert(blockedAbs) { \"Absolute path escape was not blocked!\" }\n\n    val sym = File(sandbox, \"escape_link.txt\").toPath()\n    Files.createSymbolicLink(sym, outside.toPath())\n    var blockedSymlink = false\n    try {\n        store.readEntry(\"escape_link.txt\")\n    } catch (_: SecurityException) {\n        blockedSymlink = true\n    }\n    assert(blockedSymlink) { \"Symlink escape was not blocked!\" }\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "c_sys_009_95c279",
+    "category": "c_systems",
+    "spec": "Create `rwmap.c` implementing a thread-safe concurrent integer hash table or bucket counter with per-bucket `pthread_mutex_t` locks, plus a `main()` spawning 8 threads inserting 50 keys each and verifying total count == 400 with `assert`, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "kt_conc_010_ac591c",
+    "category": "kotlin_concurrency",
+    "spec": "Create `Main.kt` implementing a thread-safe single-lane `VaultDispatcher` coroutine-style task serializer using `ReentrantLock` (`try { ... } finally { lock.unlock() }`) and a `Condition` worker queue so `submit(task)` executes tasks strictly FIFO without concurrent overlap. In `Main.kt`, use `Thread { ... }` and `assert(condition)` (do NOT import `kotlin.test.*` or `kotlinx.coroutines`) to verify 8 threads x 200 tasks complete in-order with zero overlap, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "ndk_cpp_010_e3d328",
+    "category": "ndk_cpp_cmake",
+    "spec": "Fix the lock-ordering deadlock and `CMakeLists.txt` C++17 standard in `session_ring.hpp`/`session_ring.cpp` and `CMakeLists.txt` using `std::scoped_lock` across dual account transfers so `ctest` passes.",
+    "workspace_files": {
+      "CMakeLists.txt": "cmake_minimum_required(VERSION 3.16)\nproject(session_ring_ledger LANGUAGES CXX)\nset(CMAKE_CXX_STANDARD 14)\nset(CMAKE_CXX_STANDARD_REQUIRED ON)\nenable_testing()\nfind_package(Threads REQUIRED)\nadd_executable(test_session_ring session_ring.cpp test_session_ring.cpp)\ntarget_link_libraries(test_session_ring PRIVATE Threads::Threads)\nadd_test(NAME session_ring_deadlock_test COMMAND test_session_ring)\n",
+      "session_ring.hpp": "#pragma once\n#include <cstdint>\n#include <mutex>\n\nstruct NativeAccount {\n    std::mutex mu;\n    int64_t balance{1000};\n};\n\nbool transfer(NativeAccount& from, NativeAccount& to, int64_t amount);\n",
+      "session_ring.cpp": "#include \"session_ring.hpp\"\n\nbool transfer(NativeAccount& from, NativeAccount& to, int64_t amount) {\n    if (&from == &to || amount <= 0) return false;\n    // BUG: locks in caller order -> AB/BA deadlock under concurrent opposite transfers\n    std::lock_guard<std::mutex> g1(from.mu);\n    std::lock_guard<std::mutex> g2(to.mu);\n    if (from.balance < amount) return false;\n    from.balance -= amount;\n    to.balance += amount;\n    return true;\n}\n",
+      "test_session_ring.cpp": "#include \"session_ring.hpp\"\n#include <cassert>\n#include <iostream>\n#include <thread>\n\nint main() {\n    NativeAccount a, b;\n    std::thread t1([&]() {\n        for (int i = 0; i < 200; ++i) transfer(a, b, 1);\n    });\n    std::thread t2([&]() {\n        for (int i = 0; i < 200; ++i) transfer(b, a, 1);\n    });\n    t1.join();\n    t2.join();\n    assert(a.balance + b.balance == 2000);\n    std::cout << \"ALL TESTS PASSED\\n\";\n    return 0;\n}\n"
+    }
+  },
+  {
+    "id": "masvs_010_de6704",
+    "category": "owasp_masvs",
+    "spec": "Remediate the OWASP MASVS-CRYPTO vulnerability in `WireGuard.kt`: replace `AES/ECB/PKCS5Padding` and static zero IV with `AES/GCM/NoPadding` using a fresh 12-byte `SecureRandom` IV per encryption and 128-bit authentication tag, storing `iv || ciphertext` so `Main.kt` assertions pass.",
+    "workspace_files": {
+      "WireGuard.kt": "import javax.crypto.Cipher\nimport javax.crypto.spec.SecretKeySpec\n\nclass WireGuard(private val rawKey: ByteArray) {\n    fun encrypt(plaintext: ByteArray): ByteArray {\n        val cipher = Cipher.getInstance(\"AES/ECB/PKCS5Padding\")\n        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(rawKey, \"AES\"))\n        return cipher.doFinal(plaintext)\n    }\n\n    fun decrypt(ciphertext: ByteArray): ByteArray {\n        val cipher = Cipher.getInstance(\"AES/ECB/PKCS5Padding\")\n        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(rawKey, \"AES\"))\n        return cipher.doFinal(ciphertext)\n    }\n}\n",
+      "Main.kt": "import java.io.File\nimport java.security.SecureRandom\n\nfun main() {\n    val src = File(\"WireGuard.kt\").readText()\n    assert(!src.contains(\"AES/ECB\")) { \"Insecure AES/ECB still used!\" }\n    assert(src.contains(\"AES/GCM/NoPadding\")) { \"Must use AES/GCM/NoPadding\" }\n\n    val key = ByteArray(16).also { SecureRandom().nextBytes(it) }\n    val vault = WireGuard(key)\n    val msg = \"routing=021000021;acct=998877\".toByteArray()\n    val c1 = vault.encrypt(msg)\n    val c2 = vault.encrypt(msg)\n    assert(!c1.contentEquals(c2)) { \"Ciphertext must use fresh random IV!\" }\n    assert(vault.decrypt(c1).contentEquals(msg))\n\n    val tampered = c1.copyOf()\n    tampered[tampered.lastIndex] = (tampered.last().toInt() xor 0xFF).toByte()\n    var authFailed = false\n    try {\n        vault.decrypt(tampered)\n    } catch (_: Exception) {\n        authFailed = true\n    }\n    assert(authFailed) { \"GCM tag verification must reject tampered ciphertext!\" }\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "c_sys_010_f12089",
+    "category": "c_systems",
+    "spec": "Create `barrier.c` implementing a thread-safe bounded ring buffer of capacity 8 using `pthread_mutex_t` and `pthread_cond_t`, plus a `main()` spawning 6 producer and 6 consumer threads (50 items per producer) verifying exact sum with `assert`, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "kt_conc_011_e4db05",
+    "category": "kotlin_concurrency",
+    "spec": "Create `Main.kt` implementing a thread-safe `ClearingCircuitBreaker(failureThreshold = 3, cooldownMs = 30L)` using `ReentrantLock` (`try { ... } finally { lock.unlock() }`). In `Main.kt`, use `Thread { ... }` and `assert(condition)` (do NOT import `kotlin.test.*`) to verify CLOSED -> OPEN after 3 failures, rejection while OPEN, transition to HALF_OPEN after cooldown, and concurrent calls across 6 threads, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "ndk_cpp_011_9a9788",
+    "category": "ndk_cpp_cmake",
+    "spec": "Create `CMakeLists.txt`, `crypto_buf.hpp`, `crypto_buf.cpp`, and `test_crypto_buf.cpp` implementing a thread-safe C++17 `NativeRingCache` (capacity 16) guarded by `std::mutex` and `std::lock_guard`, with `ctest` verifying 8 concurrent threads and printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "masvs_011_3df66e",
+    "category": "owasp_masvs",
+    "spec": "Remediate the OWASP MASVS-STORAGE insecure SharedPreferences/PII logging flaw in `TokenRouter.kt`: encrypt stored preference values (never persist plaintext PAN/PIN/tokens to disk) and redact sensitive tokens in `auditSummary()`, passing all assertions in `Main.kt`.",
+    "workspace_files": {
+      "TokenRouter.kt": "import java.io.File\n\nclass TokenRouter(private val prefsFile: File, private val masterKey: ByteArray) {\n    private val entries = linkedMapOf<String, String>()\n\n    fun putSecret(key: String, secretValue: String) {\n        entries[key] = secretValue\n        prefsFile.writeText(entries.entries.joinToString(\"\\n\") { \"${it.key}=${it.value}\" })\n    }\n\n    fun getSecret(key: String): String? = entries[key]\n\n    fun auditSummary(): String {\n        return entries.entries.joinToString(\", \") { \"${it.key}=${it.value}\" }\n    }\n}\n",
+      "Main.kt": "import java.io.File\nimport java.nio.file.Files\nimport java.security.SecureRandom\n\nfun main() {\n    val f = Files.createTempFile(\"secure_prefs_\", \".dat\").toFile()\n    val key = ByteArray(16).also { SecureRandom().nextBytes(it) }\n    val store = TokenRouter(f, key)\n    val pan = \"4111222233334444\"\n    store.putSecret(\"card_pan\", pan)\n    assert(store.getSecret(\"card_pan\") == pan)\n    val disk = f.readText()\n    assert(!disk.contains(pan)) { \"Plaintext PAN persisted on disk!\" }\n    val summary = store.auditSummary()\n    assert(!summary.contains(pan)) { \"Plaintext PAN leaked in auditSummary!\" }\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "c_sys_011_2135ee",
+    "category": "c_systems",
+    "spec": "Create `workq.c` implementing a thread-safe concurrent integer hash table or bucket counter with per-bucket `pthread_mutex_t` locks, plus a `main()` spawning 8 threads inserting 50 keys each and verifying total count == 400 with `assert`, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "masvs_012_de9df6",
+    "category": "owasp_masvs",
+    "spec": "Remediate the OWASP MASVS-STORAGE hardcoded secret vulnerability in `TokenQueue.kt`: remove the hardcoded signing secret, require an injected/environment secret provider (throwing `IllegalStateException` if blank), use HMAC-SHA256 with constant-time `MessageDigest.isEqual`, and make `verifyToken` pass all assertions in `Main.kt` (do NOT import `kotlin.test.*`).",
+    "workspace_files": {
+      "TokenQueue.kt": "class TokenQueue(private val keyProvider: () -> ByteArray = { ByteArray(0) }) {\n    companion object {\n        private const val HARDCODED_SECRET = \"sk_live_847581_token\"\n    }\n\n    fun signToken(payload: String): ByteArray {\n        return (HARDCODED_SECRET + \":\" + payload).toByteArray(Charsets.UTF_8)\n    }\n\n    fun verifyToken(payload: String, sig: ByteArray): Boolean {\n        return signToken(payload).contentEquals(sig)\n    }\n}\n",
+      "Main.kt": "import java.io.File\n\nfun main() {\n    val src = File(\"TokenQueue.kt\").readText()\n    assert(!src.contains(\"sk_live_847581_token\")) { \"Hardcoded secret still present!\" }\n    assert(!src.contains(\"HARDCODED_SECRET\")) { \"Hardcoded constant still present!\" }\n\n    var failedEmpty = false\n    try {\n        TokenQueue { ByteArray(0) }.signToken(\"acct=42\")\n    } catch (_: IllegalStateException) {\n        failedEmpty = true\n    }\n    assert(failedEmpty) { \"Blank key must throw IllegalStateException\" }\n\n    val key = \"bank-rotated-ephemeral-key-32bytes\".toByteArray()\n    val store = TokenQueue { key }\n    val sig = store.signToken(\"acct=42\")\n    assert(store.verifyToken(\"acct=42\", sig))\n    assert(!store.verifyToken(\"acct=99\", sig))\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "c_sys_012_608b76",
+    "category": "c_systems",
+    "spec": "Create `rwmap.c` implementing a thread-safe bounded ring buffer of capacity 32 using `pthread_mutex_t` and `pthread_cond_t`, plus a `main()` spawning 6 producer and 6 consumer threads (150 items per producer) verifying exact sum with `assert`, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "kt_conc_013_b1459b",
+    "category": "kotlin_concurrency",
+    "spec": "Fix `ClearingBoundedPool.kt` so `acquire()` and `release()` are thread-safe and properly block when empty/full using `ReentrantLock` and `Condition` (`try { ... } finally { lock.unlock() }`), avoiding lost wakeups (`signalAll()`). Do NOT import `kotlin.test.*`. Verify `Main.kt` prints 'ALL TESTS PASSED'.",
+    "workspace_files": {
+      "ClearingBoundedPool.kt": "import java.util.ArrayDeque\n\nclass ClearingBoundedPool(private val capacity: Int) {\n    private val items = ArrayDeque<Int>((0 until capacity).toList())\n\n    fun acquire(): Int {\n        if (items.isEmpty()) {\n            throw IllegalStateException(\"Pool exhausted without blocking\")\n        }\n        return items.removeFirst()\n    }\n\n    fun release(item: Int) {\n        items.addLast(item)\n    }\n}\n",
+      "Main.kt": "import java.util.concurrent.atomic.AtomicInteger\n\nfun main() {\n    val pool = ClearingBoundedPool(3)\n    val completed = AtomicInteger(0)\n    val active = AtomicInteger(0)\n    val maxSeen = AtomicInteger(0)\n    val workers = (0 until 6).map {\n        Thread {\n            for (i in 0 until 25) {\n                val slot = pool.acquire()\n                val cur = active.incrementAndGet()\n                maxSeen.accumulateAndGet(cur, Math::max)\n                Thread.sleep(1)\n                active.decrementAndGet()\n                pool.release(slot)\n                completed.incrementAndGet()\n            }\n        }\n    }\n    workers.forEach { it.start() }\n    workers.forEach { it.join() }\n    assert(completed.get() == 150) { \"Completed=${completed.get()}\" }\n    assert(maxSeen.get() <= 3) { \"Exceeded capacity: ${maxSeen.get()}\" }\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "masvs_013_725598",
+    "category": "owasp_masvs",
+    "spec": "Remediate the OWASP MASVS-STORAGE / path-traversal vulnerability in `LedgerQueue.kt`: enforce strict `canonicalPath` sandbox jailing inside `rootDir` (rejecting absolute paths, `../` traversal, and symlinks escaping `rootDir` with `SecurityException`), and ensure all assertions in `Main.kt` pass.",
+    "workspace_files": {
+      "LedgerQueue.kt": "import java.io.File\n\nclass LedgerQueue(private val rootDir: File) {\n    init { rootDir.mkdirs() }\n\n    fun readEntry(relPath: String): String {\n        val target = File(rootDir, relPath)\n        return target.readText(Charsets.UTF_8)\n    }\n\n    fun writeEntry(relPath: String, content: String) {\n        val target = File(rootDir, relPath)\n        target.parentFile?.mkdirs()\n        target.writeText(content, Charsets.UTF_8)\n    }\n}\n",
+      "Main.kt": "import java.io.File\nimport java.nio.file.Files\n\nfun main() {\n    val tmp = Files.createTempDirectory(\"masvs_jail_\").toFile()\n    val outside = Files.createTempFile(\"masvs_secret_\", \".txt\").toFile()\n    outside.writeText(\"TOP_SECRET_BANK_KEY\")\n    val sandbox = File(tmp, \"sandbox\")\n    val store = LedgerQueue(sandbox)\n    store.writeEntry(\"ok.txt\", \"safe-payload\")\n    assert(store.readEntry(\"ok.txt\") == \"safe-payload\")\n\n    var blockedTraversal = false\n    try {\n        store.readEntry(\"../\" + outside.name)\n    } catch (_: SecurityException) {\n        blockedTraversal = true\n    }\n    assert(blockedTraversal) { \"Path traversal was not blocked!\" }\n\n    var blockedAbs = false\n    try {\n        store.readEntry(outside.absolutePath)\n    } catch (_: SecurityException) {\n        blockedAbs = true\n    }\n    assert(blockedAbs) { \"Absolute path escape was not blocked!\" }\n\n    val sym = File(sandbox, \"escape_link.txt\").toPath()\n    Files.createSymbolicLink(sym, outside.toPath())\n    var blockedSymlink = false\n    try {\n        store.readEntry(\"escape_link.txt\")\n    } catch (_: SecurityException) {\n        blockedSymlink = true\n    }\n    assert(blockedSymlink) { \"Symlink escape was not blocked!\" }\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "c_sys_013_6a5a56",
+    "category": "c_systems",
+    "spec": "Create `hashmap.c` implementing a thread-safe concurrent integer hash table or bucket counter with per-bucket `pthread_mutex_t` locks, plus a `main()` spawning 4 threads inserting 50 keys each and verifying total count == 200 with `assert`, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "kt_conc_014_9dd95f",
+    "category": "kotlin_concurrency",
+    "spec": "Create `Main.kt` implementing a thread-safe single-lane `CardDispatcher` coroutine-style task serializer using `ReentrantLock` (`try { ... } finally { lock.unlock() }`) and a `Condition` worker queue so `submit(task)` executes tasks strictly FIFO without concurrent overlap. In `Main.kt`, use `Thread { ... }` and `assert(condition)` (do NOT import `kotlin.test.*` or `kotlinx.coroutines`) to verify 4 threads x 150 tasks complete in-order with zero overlap, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "ndk_cpp_014_e4b70f",
+    "category": "ndk_cpp_cmake",
+    "spec": "Fix the lock-ordering deadlock and `CMakeLists.txt` C++17 standard in `jni_bridge.hpp`/`jni_bridge.cpp` and `CMakeLists.txt` using `std::scoped_lock` across dual account transfers so `ctest` passes.",
+    "workspace_files": {
+      "CMakeLists.txt": "cmake_minimum_required(VERSION 3.16)\nproject(jni_bridge_ledger LANGUAGES CXX)\nset(CMAKE_CXX_STANDARD 14)\nset(CMAKE_CXX_STANDARD_REQUIRED ON)\nenable_testing()\nfind_package(Threads REQUIRED)\nadd_executable(test_jni_bridge jni_bridge.cpp test_jni_bridge.cpp)\ntarget_link_libraries(test_jni_bridge PRIVATE Threads::Threads)\nadd_test(NAME jni_bridge_deadlock_test COMMAND test_jni_bridge)\n",
+      "jni_bridge.hpp": "#pragma once\n#include <cstdint>\n#include <mutex>\n\nstruct NativeAccount {\n    std::mutex mu;\n    int64_t balance{1000};\n};\n\nbool transfer(NativeAccount& from, NativeAccount& to, int64_t amount);\n",
+      "jni_bridge.cpp": "#include \"jni_bridge.hpp\"\n\nbool transfer(NativeAccount& from, NativeAccount& to, int64_t amount) {\n    if (&from == &to || amount <= 0) return false;\n    // BUG: locks in caller order -> AB/BA deadlock under concurrent opposite transfers\n    std::lock_guard<std::mutex> g1(from.mu);\n    std::lock_guard<std::mutex> g2(to.mu);\n    if (from.balance < amount) return false;\n    from.balance -= amount;\n    to.balance += amount;\n    return true;\n}\n",
+      "test_jni_bridge.cpp": "#include \"jni_bridge.hpp\"\n#include <cassert>\n#include <iostream>\n#include <thread>\n\nint main() {\n    NativeAccount a, b;\n    std::thread t1([&]() {\n        for (int i = 0; i < 200; ++i) transfer(a, b, 1);\n    });\n    std::thread t2([&]() {\n        for (int i = 0; i < 200; ++i) transfer(b, a, 1);\n    });\n    t1.join();\n    t2.join();\n    assert(a.balance + b.balance == 2000);\n    std::cout << \"ALL TESTS PASSED\\n\";\n    return 0;\n}\n"
+    }
+  },
+  {
+    "id": "masvs_014_d8c118",
+    "category": "owasp_masvs",
+    "spec": "Remediate the OWASP MASVS-CRYPTO vulnerability in `TreasuryCache.kt`: replace `AES/ECB/PKCS5Padding` and static zero IV with `AES/GCM/NoPadding` using a fresh 12-byte `SecureRandom` IV per encryption and 128-bit authentication tag, storing `iv || ciphertext` so `Main.kt` assertions pass.",
+    "workspace_files": {
+      "TreasuryCache.kt": "import javax.crypto.Cipher\nimport javax.crypto.spec.SecretKeySpec\n\nclass TreasuryCache(private val rawKey: ByteArray) {\n    fun encrypt(plaintext: ByteArray): ByteArray {\n        val cipher = Cipher.getInstance(\"AES/ECB/PKCS5Padding\")\n        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(rawKey, \"AES\"))\n        return cipher.doFinal(plaintext)\n    }\n\n    fun decrypt(ciphertext: ByteArray): ByteArray {\n        val cipher = Cipher.getInstance(\"AES/ECB/PKCS5Padding\")\n        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(rawKey, \"AES\"))\n        return cipher.doFinal(ciphertext)\n    }\n}\n",
+      "Main.kt": "import java.io.File\nimport java.security.SecureRandom\n\nfun main() {\n    val src = File(\"TreasuryCache.kt\").readText()\n    assert(!src.contains(\"AES/ECB\")) { \"Insecure AES/ECB still used!\" }\n    assert(src.contains(\"AES/GCM/NoPadding\")) { \"Must use AES/GCM/NoPadding\" }\n\n    val key = ByteArray(16).also { SecureRandom().nextBytes(it) }\n    val vault = TreasuryCache(key)\n    val msg = \"routing=021000021;acct=998877\".toByteArray()\n    val c1 = vault.encrypt(msg)\n    val c2 = vault.encrypt(msg)\n    assert(!c1.contentEquals(c2)) { \"Ciphertext must use fresh random IV!\" }\n    assert(vault.decrypt(c1).contentEquals(msg))\n\n    val tampered = c1.copyOf()\n    tampered[tampered.lastIndex] = (tampered.last().toInt() xor 0xFF).toByte()\n    var authFailed = false\n    try {\n        vault.decrypt(tampered)\n    } catch (_: Exception) {\n        authFailed = true\n    }\n    assert(authFailed) { \"GCM tag verification must reject tampered ciphertext!\" }\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "c_sys_014_cd468a",
+    "category": "c_systems",
+    "spec": "Create `sempool.c` implementing a thread-safe bounded ring buffer of capacity 8 using `pthread_mutex_t` and `pthread_cond_t`, plus a `main()` spawning 4 producer and 4 consumer threads (150 items per producer) verifying exact sum with `assert`, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "kt_conc_015_a720c0",
+    "category": "kotlin_concurrency",
+    "spec": "Create `Main.kt` implementing a thread-safe `TokenCircuitBreaker(failureThreshold = 4, cooldownMs = 30L)` using `ReentrantLock` (`try { ... } finally { lock.unlock() }`). In `Main.kt`, use `Thread { ... }` and `assert(condition)` (do NOT import `kotlin.test.*`) to verify CLOSED -> OPEN after 4 failures, rejection while OPEN, transition to HALF_OPEN after cooldown, and concurrent calls across 8 threads, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "ndk_cpp_015_d099c7",
+    "category": "ndk_cpp_cmake",
+    "spec": "Create `CMakeLists.txt`, `keystore_shim.hpp`, `keystore_shim.cpp`, and `test_keystore_shim.cpp` implementing a thread-safe C++17 `NativeRingCache` (capacity 16) guarded by `std::mutex` and `std::lock_guard`, with `ctest` verifying 6 concurrent threads and printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "masvs_015_21a28e",
+    "category": "owasp_masvs",
+    "spec": "Remediate the OWASP MASVS-STORAGE insecure SharedPreferences/PII logging flaw in `VaultGate.kt`: encrypt stored preference values (never persist plaintext PAN/PIN/tokens to disk) and redact sensitive tokens in `auditSummary()`, passing all assertions in `Main.kt`.",
+    "workspace_files": {
+      "VaultGate.kt": "import java.io.File\n\nclass VaultGate(private val prefsFile: File, private val masterKey: ByteArray) {\n    private val entries = linkedMapOf<String, String>()\n\n    fun putSecret(key: String, secretValue: String) {\n        entries[key] = secretValue\n        prefsFile.writeText(entries.entries.joinToString(\"\\n\") { \"${it.key}=${it.value}\" })\n    }\n\n    fun getSecret(key: String): String? = entries[key]\n\n    fun auditSummary(): String {\n        return entries.entries.joinToString(\", \") { \"${it.key}=${it.value}\" }\n    }\n}\n",
+      "Main.kt": "import java.io.File\nimport java.nio.file.Files\nimport java.security.SecureRandom\n\nfun main() {\n    val f = Files.createTempFile(\"secure_prefs_\", \".dat\").toFile()\n    val key = ByteArray(16).also { SecureRandom().nextBytes(it) }\n    val store = VaultGate(f, key)\n    val pan = \"4111222233334444\"\n    store.putSecret(\"card_pan\", pan)\n    assert(store.getSecret(\"card_pan\") == pan)\n    val disk = f.readText()\n    assert(!disk.contains(pan)) { \"Plaintext PAN persisted on disk!\" }\n    val summary = store.auditSummary()\n    assert(!summary.contains(pan)) { \"Plaintext PAN leaked in auditSummary!\" }\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "c_sys_015_fec9da",
+    "category": "c_systems",
+    "spec": "Create `barrier.c` implementing a thread-safe concurrent integer hash table or bucket counter with per-bucket `pthread_mutex_t` locks, plus a `main()` spawning 6 threads inserting 100 keys each and verifying total count == 600 with `assert`, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "kt_conc_016_32df26",
+    "category": "kotlin_concurrency",
+    "spec": "Fix the race condition in `TokenAccumulator.kt` by guarding shared state with `ReentrantLock` (using `try { ... } finally { lock.unlock() }`). Do NOT modify the test invariants in `Main.kt`, and do NOT import `kotlin.test.*`. Ensure `compile_and_test` prints 'ALL TESTS PASSED'.",
+    "workspace_files": {
+      "TokenAccumulator.kt": "class TokenAccumulator {\n    private var balance: Long = 0L\n    private val entries = mutableListOf<String>()\n\n    fun record(tag: String, amount: Long) {\n        val next = balance + amount\n        Thread.yield()\n        balance = next\n        entries.add(tag)\n    }\n\n    fun totalBalance(): Long = balance\n    fun entryCount(): Int = entries.size\n}\n",
+      "Main.kt": "import java.util.concurrent.CountDownLatch\n\nfun main() {\n    val acc = TokenAccumulator()\n    val start = CountDownLatch(1)\n    val workers = (0 until 4).map { tid ->\n        Thread {\n            start.await()\n            for (i in 0 until 100) {\n                acc.record(\"t$tid-$i\", 1L)\n            }\n        }\n    }\n    workers.forEach { it.start() }\n    start.countDown()\n    workers.forEach { it.join() }\n    assert(acc.totalBalance() == 400L) { \"Expected 400, got ${acc.totalBalance()}\" }\n    assert(acc.entryCount() == 400) { \"Expected 400 entries, got ${acc.entryCount()}\" }\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "masvs_016_c56cab",
+    "category": "owasp_masvs",
+    "spec": "Remediate the OWASP MASVS-STORAGE hardcoded secret vulnerability in `TreasuryQueue.kt`: remove the hardcoded signing secret, require an injected/environment secret provider (throwing `IllegalStateException` if blank), use HMAC-SHA256 with constant-time `MessageDigest.isEqual`, and make `verifyToken` pass all assertions in `Main.kt` (do NOT import `kotlin.test.*`).",
+    "workspace_files": {
+      "TreasuryQueue.kt": "class TreasuryQueue(private val keyProvider: () -> ByteArray = { ByteArray(0) }) {\n    companion object {\n        private const val HARDCODED_SECRET = \"sk_live_299448_treasury\"\n    }\n\n    fun signToken(payload: String): ByteArray {\n        return (HARDCODED_SECRET + \":\" + payload).toByteArray(Charsets.UTF_8)\n    }\n\n    fun verifyToken(payload: String, sig: ByteArray): Boolean {\n        return signToken(payload).contentEquals(sig)\n    }\n}\n",
+      "Main.kt": "import java.io.File\n\nfun main() {\n    val src = File(\"TreasuryQueue.kt\").readText()\n    assert(!src.contains(\"sk_live_299448_treasury\")) { \"Hardcoded secret still present!\" }\n    assert(!src.contains(\"HARDCODED_SECRET\")) { \"Hardcoded constant still present!\" }\n\n    var failedEmpty = false\n    try {\n        TreasuryQueue { ByteArray(0) }.signToken(\"acct=42\")\n    } catch (_: IllegalStateException) {\n        failedEmpty = true\n    }\n    assert(failedEmpty) { \"Blank key must throw IllegalStateException\" }\n\n    val key = \"bank-rotated-ephemeral-key-32bytes\".toByteArray()\n    val store = TreasuryQueue { key }\n    val sig = store.signToken(\"acct=42\")\n    assert(store.verifyToken(\"acct=42\", sig))\n    assert(!store.verifyToken(\"acct=99\", sig))\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "c_sys_016_4f48c0",
+    "category": "c_systems",
+    "spec": "Create `sempool.c` implementing a thread-safe bounded ring buffer of capacity 8 using `pthread_mutex_t` and `pthread_cond_t`, plus a `main()` spawning 4 producer and 4 consumer threads (100 items per producer) verifying exact sum with `assert`, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "kt_conc_017_568fef",
+    "category": "kotlin_concurrency",
+    "spec": "Fix `EscrowBoundedPool.kt` so `acquire()` and `release()` are thread-safe and properly block when empty/full using `ReentrantLock` and `Condition` (`try { ... } finally { lock.unlock() }`), avoiding lost wakeups (`signalAll()`). Do NOT import `kotlin.test.*`. Verify `Main.kt` prints 'ALL TESTS PASSED'.",
+    "workspace_files": {
+      "EscrowBoundedPool.kt": "import java.util.ArrayDeque\n\nclass EscrowBoundedPool(private val capacity: Int) {\n    private val items = ArrayDeque<Int>((0 until capacity).toList())\n\n    fun acquire(): Int {\n        if (items.isEmpty()) {\n            throw IllegalStateException(\"Pool exhausted without blocking\")\n        }\n        return items.removeFirst()\n    }\n\n    fun release(item: Int) {\n        items.addLast(item)\n    }\n}\n",
+      "Main.kt": "import java.util.concurrent.atomic.AtomicInteger\n\nfun main() {\n    val pool = EscrowBoundedPool(3)\n    val completed = AtomicInteger(0)\n    val active = AtomicInteger(0)\n    val maxSeen = AtomicInteger(0)\n    val workers = (0 until 6).map {\n        Thread {\n            for (i in 0 until 25) {\n                val slot = pool.acquire()\n                val cur = active.incrementAndGet()\n                maxSeen.accumulateAndGet(cur, Math::max)\n                Thread.sleep(1)\n                active.decrementAndGet()\n                pool.release(slot)\n                completed.incrementAndGet()\n            }\n        }\n    }\n    workers.forEach { it.start() }\n    workers.forEach { it.join() }\n    assert(completed.get() == 150) { \"Completed=${completed.get()}\" }\n    assert(maxSeen.get() <= 3) { \"Exceeded capacity: ${maxSeen.get()}\" }\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "ndk_cpp_017_f21269",
+    "category": "ndk_cpp_cmake",
+    "spec": "Fix the JNI-style UTF-8 C++17 buffer truncation/off-by-one and `std::mutex` race in `keystore_shim.hpp`/`keystore_shim.cpp` and ensure `CMakeLists.txt` builds and passes `ctest` across 8 threads.",
+    "workspace_files": {
+      "CMakeLists.txt": "cmake_minimum_required(VERSION 3.16)\nproject(keystore_shim_jni LANGUAGES CXX)\nset(CMAKE_CXX_STANDARD 17)\nset(CMAKE_CXX_STANDARD_REQUIRED ON)\nenable_testing()\nfind_package(Threads REQUIRED)\nadd_executable(test_keystore_shim keystore_shim.cpp test_keystore_shim.cpp)\ntarget_link_libraries(test_keystore_shim PRIVATE Threads::Threads)\nadd_test(NAME keystore_shim_jni_test COMMAND test_keystore_shim)\n",
+      "keystore_shim.hpp": "#pragma once\n#include <mutex>\n#include <string>\n\nclass JniStringSlot {\npublic:\n    void set(const char* src);\n    std::string get() const;\n\nprivate:\n    mutable std::mutex mu_;\n    char buf_[32] = {0};\n};\n",
+      "keystore_shim.cpp": "#include \"keystore_shim.hpp\"\n#include <cstring>\n\nvoid JniStringSlot::set(const char* src) {\n    // BUG: missing mutex lock and off-by-one null terminator copy\n    if (!src) return;\n    std::size_t n = std::strlen(src);\n    if (n > sizeof(buf_)) n = sizeof(buf_);\n    std::memcpy(buf_, src, n);\n}\n\nstd::string JniStringSlot::get() const {\n    return std::string(buf_);\n}\n",
+      "test_keystore_shim.cpp": "#include \"keystore_shim.hpp\"\n#include <cassert>\n#include <iostream>\n#include <thread>\n#include <vector>\n\nint main() {\n    JniStringSlot slot;\n    std::string long_input(64, 'A');\n    slot.set(long_input.c_str());\n    assert(slot.get().size() == 31);\n\n    std::vector<std::thread> workers;\n    for (int t = 0; t < 8; ++t) {\n        workers.emplace_back([&slot, t]() {\n            for (int i = 0; i < 200; ++i) {\n                std::string s = \"token_\" + std::to_string(t);\n                slot.set(s.c_str());\n                assert(!slot.get().empty());\n            }\n        });\n    }\n    for (auto& w : workers) w.join();\n    std::cout << \"ALL TESTS PASSED\\n\";\n    return 0;\n}\n"
+    }
+  },
+  {
+    "id": "masvs_017_75ebb1",
+    "category": "owasp_masvs",
+    "spec": "Remediate the OWASP MASVS-STORAGE / path-traversal vulnerability in `CardGuard.kt`: enforce strict `canonicalPath` sandbox jailing inside `rootDir` (rejecting absolute paths, `../` traversal, and symlinks escaping `rootDir` with `SecurityException`), and ensure all assertions in `Main.kt` pass.",
+    "workspace_files": {
+      "CardGuard.kt": "import java.io.File\n\nclass CardGuard(private val rootDir: File) {\n    init { rootDir.mkdirs() }\n\n    fun readEntry(relPath: String): String {\n        val target = File(rootDir, relPath)\n        return target.readText(Charsets.UTF_8)\n    }\n\n    fun writeEntry(relPath: String, content: String) {\n        val target = File(rootDir, relPath)\n        target.parentFile?.mkdirs()\n        target.writeText(content, Charsets.UTF_8)\n    }\n}\n",
+      "Main.kt": "import java.io.File\nimport java.nio.file.Files\n\nfun main() {\n    val tmp = Files.createTempDirectory(\"masvs_jail_\").toFile()\n    val outside = Files.createTempFile(\"masvs_secret_\", \".txt\").toFile()\n    outside.writeText(\"TOP_SECRET_BANK_KEY\")\n    val sandbox = File(tmp, \"sandbox\")\n    val store = CardGuard(sandbox)\n    store.writeEntry(\"ok.txt\", \"safe-payload\")\n    assert(store.readEntry(\"ok.txt\") == \"safe-payload\")\n\n    var blockedTraversal = false\n    try {\n        store.readEntry(\"../\" + outside.name)\n    } catch (_: SecurityException) {\n        blockedTraversal = true\n    }\n    assert(blockedTraversal) { \"Path traversal was not blocked!\" }\n\n    var blockedAbs = false\n    try {\n        store.readEntry(outside.absolutePath)\n    } catch (_: SecurityException) {\n        blockedAbs = true\n    }\n    assert(blockedAbs) { \"Absolute path escape was not blocked!\" }\n\n    val sym = File(sandbox, \"escape_link.txt\").toPath()\n    Files.createSymbolicLink(sym, outside.toPath())\n    var blockedSymlink = false\n    try {\n        store.readEntry(\"escape_link.txt\")\n    } catch (_: SecurityException) {\n        blockedSymlink = true\n    }\n    assert(blockedSymlink) { \"Symlink escape was not blocked!\" }\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "c_sys_017_a469e5",
+    "category": "c_systems",
+    "spec": "Create `workq.c` implementing a thread-safe concurrent integer hash table or bucket counter with per-bucket `pthread_mutex_t` locks, plus a `main()` spawning 4 threads inserting 50 keys each and verifying total count == 200 with `assert`, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "kt_conc_018_59a42e",
+    "category": "kotlin_concurrency",
+    "spec": "Create `Main.kt` implementing a thread-safe single-lane `RemittanceDispatcher` coroutine-style task serializer using `ReentrantLock` (`try { ... } finally { lock.unlock() }`) and a `Condition` worker queue so `submit(task)` executes tasks strictly FIFO without concurrent overlap. In `Main.kt`, use `Thread { ... }` and `assert(condition)` (do NOT import `kotlin.test.*` or `kotlinx.coroutines`) to verify 6 threads x 150 tasks complete in-order with zero overlap, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "masvs_018_722613",
+    "category": "owasp_masvs",
+    "spec": "Remediate the OWASP MASVS-CRYPTO vulnerability in `CustodyCache.kt`: replace `AES/ECB/PKCS5Padding` and static zero IV with `AES/GCM/NoPadding` using a fresh 12-byte `SecureRandom` IV per encryption and 128-bit authentication tag, storing `iv || ciphertext` so `Main.kt` assertions pass.",
+    "workspace_files": {
+      "CustodyCache.kt": "import javax.crypto.Cipher\nimport javax.crypto.spec.SecretKeySpec\n\nclass CustodyCache(private val rawKey: ByteArray) {\n    fun encrypt(plaintext: ByteArray): ByteArray {\n        val cipher = Cipher.getInstance(\"AES/ECB/PKCS5Padding\")\n        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(rawKey, \"AES\"))\n        return cipher.doFinal(plaintext)\n    }\n\n    fun decrypt(ciphertext: ByteArray): ByteArray {\n        val cipher = Cipher.getInstance(\"AES/ECB/PKCS5Padding\")\n        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(rawKey, \"AES\"))\n        return cipher.doFinal(ciphertext)\n    }\n}\n",
+      "Main.kt": "import java.io.File\nimport java.security.SecureRandom\n\nfun main() {\n    val src = File(\"CustodyCache.kt\").readText()\n    assert(!src.contains(\"AES/ECB\")) { \"Insecure AES/ECB still used!\" }\n    assert(src.contains(\"AES/GCM/NoPadding\")) { \"Must use AES/GCM/NoPadding\" }\n\n    val key = ByteArray(16).also { SecureRandom().nextBytes(it) }\n    val vault = CustodyCache(key)\n    val msg = \"routing=021000021;acct=998877\".toByteArray()\n    val c1 = vault.encrypt(msg)\n    val c2 = vault.encrypt(msg)\n    assert(!c1.contentEquals(c2)) { \"Ciphertext must use fresh random IV!\" }\n    assert(vault.decrypt(c1).contentEquals(msg))\n\n    val tampered = c1.copyOf()\n    tampered[tampered.lastIndex] = (tampered.last().toInt() xor 0xFF).toByte()\n    var authFailed = false\n    try {\n        vault.decrypt(tampered)\n    } catch (_: Exception) {\n        authFailed = true\n    }\n    assert(authFailed) { \"GCM tag verification must reject tampered ciphertext!\" }\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "c_sys_018_d18d8b",
+    "category": "c_systems",
+    "spec": "Create `sempool.c` implementing a thread-safe bounded ring buffer of capacity 32 using `pthread_mutex_t` and `pthread_cond_t`, plus a `main()` spawning 6 producer and 6 consumer threads (100 items per producer) verifying exact sum with `assert`, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "ndk_cpp_019_7d1e93",
+    "category": "ndk_cpp_cmake",
+    "spec": "Create `CMakeLists.txt`, `crypto_buf.hpp`, `crypto_buf.cpp`, and `test_crypto_buf.cpp` implementing a thread-safe C++17 `NativeRingCache` (capacity 16) guarded by `std::mutex` and `std::lock_guard`, with `ctest` verifying 6 concurrent threads and printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "masvs_019_08cc3e",
+    "category": "owasp_masvs",
+    "spec": "Remediate the OWASP MASVS-STORAGE insecure SharedPreferences/PII logging flaw in `AccountGuard.kt`: encrypt stored preference values (never persist plaintext PAN/PIN/tokens to disk) and redact sensitive tokens in `auditSummary()`, passing all assertions in `Main.kt`.",
+    "workspace_files": {
+      "AccountGuard.kt": "import java.io.File\n\nclass AccountGuard(private val prefsFile: File, private val masterKey: ByteArray) {\n    private val entries = linkedMapOf<String, String>()\n\n    fun putSecret(key: String, secretValue: String) {\n        entries[key] = secretValue\n        prefsFile.writeText(entries.entries.joinToString(\"\\n\") { \"${it.key}=${it.value}\" })\n    }\n\n    fun getSecret(key: String): String? = entries[key]\n\n    fun auditSummary(): String {\n        return entries.entries.joinToString(\", \") { \"${it.key}=${it.value}\" }\n    }\n}\n",
+      "Main.kt": "import java.io.File\nimport java.nio.file.Files\nimport java.security.SecureRandom\n\nfun main() {\n    val f = Files.createTempFile(\"secure_prefs_\", \".dat\").toFile()\n    val key = ByteArray(16).also { SecureRandom().nextBytes(it) }\n    val store = AccountGuard(f, key)\n    val pan = \"4111222233334444\"\n    store.putSecret(\"card_pan\", pan)\n    assert(store.getSecret(\"card_pan\") == pan)\n    val disk = f.readText()\n    assert(!disk.contains(pan)) { \"Plaintext PAN persisted on disk!\" }\n    val summary = store.auditSummary()\n    assert(!summary.contains(pan)) { \"Plaintext PAN leaked in auditSummary!\" }\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "kt_conc_020_16b29f",
+    "category": "kotlin_concurrency",
+    "spec": "Fix the race condition in `RemittanceAccumulator.kt` by guarding shared state with `ReentrantLock` (using `try { ... } finally { lock.unlock() }`). Do NOT modify the test invariants in `Main.kt`, and do NOT import `kotlin.test.*`. Ensure `compile_and_test` prints 'ALL TESTS PASSED'.",
+    "workspace_files": {
+      "RemittanceAccumulator.kt": "class RemittanceAccumulator {\n    private var balance: Long = 0L\n    private val entries = mutableListOf<String>()\n\n    fun record(tag: String, amount: Long) {\n        val next = balance + amount\n        Thread.yield()\n        balance = next\n        entries.add(tag)\n    }\n\n    fun totalBalance(): Long = balance\n    fun entryCount(): Int = entries.size\n}\n",
+      "Main.kt": "import java.util.concurrent.CountDownLatch\n\nfun main() {\n    val acc = RemittanceAccumulator()\n    val start = CountDownLatch(1)\n    val workers = (0 until 8).map { tid ->\n        Thread {\n            start.await()\n            for (i in 0 until 150) {\n                acc.record(\"t$tid-$i\", 1L)\n            }\n        }\n    }\n    workers.forEach { it.start() }\n    start.countDown()\n    workers.forEach { it.join() }\n    assert(acc.totalBalance() == 1200L) { \"Expected 1200, got ${acc.totalBalance()}\" }\n    assert(acc.entryCount() == 1200) { \"Expected 1200 entries, got ${acc.entryCount()}\" }\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "masvs_020_a5cf8b",
+    "category": "owasp_masvs",
+    "spec": "Remediate the OWASP MASVS-STORAGE hardcoded secret vulnerability in `VaultQueue.kt`: remove the hardcoded signing secret, require an injected/environment secret provider (throwing `IllegalStateException` if blank), use HMAC-SHA256 with constant-time `MessageDigest.isEqual`, and make `verifyToken` pass all assertions in `Main.kt` (do NOT import `kotlin.test.*`).",
+    "workspace_files": {
+      "VaultQueue.kt": "class VaultQueue(private val keyProvider: () -> ByteArray = { ByteArray(0) }) {\n    companion object {\n        private const val HARDCODED_SECRET = \"sk_live_523389_vault\"\n    }\n\n    fun signToken(payload: String): ByteArray {\n        return (HARDCODED_SECRET + \":\" + payload).toByteArray(Charsets.UTF_8)\n    }\n\n    fun verifyToken(payload: String, sig: ByteArray): Boolean {\n        return signToken(payload).contentEquals(sig)\n    }\n}\n",
+      "Main.kt": "import java.io.File\n\nfun main() {\n    val src = File(\"VaultQueue.kt\").readText()\n    assert(!src.contains(\"sk_live_523389_vault\")) { \"Hardcoded secret still present!\" }\n    assert(!src.contains(\"HARDCODED_SECRET\")) { \"Hardcoded constant still present!\" }\n\n    var failedEmpty = false\n    try {\n        VaultQueue { ByteArray(0) }.signToken(\"acct=42\")\n    } catch (_: IllegalStateException) {\n        failedEmpty = true\n    }\n    assert(failedEmpty) { \"Blank key must throw IllegalStateException\" }\n\n    val key = \"bank-rotated-ephemeral-key-32bytes\".toByteArray()\n    val store = VaultQueue { key }\n    val sig = store.signToken(\"acct=42\")\n    assert(store.verifyToken(\"acct=42\", sig))\n    assert(!store.verifyToken(\"acct=99\", sig))\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "c_sys_020_cd3e5e",
+    "category": "c_systems",
+    "spec": "Create `workq.c` implementing a thread-safe bounded ring buffer of capacity 32 using `pthread_mutex_t` and `pthread_cond_t`, plus a `main()` spawning 8 producer and 8 consumer threads (50 items per producer) verifying exact sum with `assert`, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "kt_conc_021_ead1ae",
+    "category": "kotlin_concurrency",
+    "spec": "Fix `AccountBoundedPool.kt` so `acquire()` and `release()` are thread-safe and properly block when empty/full using `ReentrantLock` and `Condition` (`try { ... } finally { lock.unlock() }`), avoiding lost wakeups (`signalAll()`). Do NOT import `kotlin.test.*`. Verify `Main.kt` prints 'ALL TESTS PASSED'.",
+    "workspace_files": {
+      "AccountBoundedPool.kt": "import java.util.ArrayDeque\n\nclass AccountBoundedPool(private val capacity: Int) {\n    private val items = ArrayDeque<Int>((0 until capacity).toList())\n\n    fun acquire(): Int {\n        if (items.isEmpty()) {\n            throw IllegalStateException(\"Pool exhausted without blocking\")\n        }\n        return items.removeFirst()\n    }\n\n    fun release(item: Int) {\n        items.addLast(item)\n    }\n}\n",
+      "Main.kt": "import java.util.concurrent.atomic.AtomicInteger\n\nfun main() {\n    val pool = AccountBoundedPool(6)\n    val completed = AtomicInteger(0)\n    val active = AtomicInteger(0)\n    val maxSeen = AtomicInteger(0)\n    val workers = (0 until 4).map {\n        Thread {\n            for (i in 0 until 25) {\n                val slot = pool.acquire()\n                val cur = active.incrementAndGet()\n                maxSeen.accumulateAndGet(cur, Math::max)\n                Thread.sleep(1)\n                active.decrementAndGet()\n                pool.release(slot)\n                completed.incrementAndGet()\n            }\n        }\n    }\n    workers.forEach { it.start() }\n    workers.forEach { it.join() }\n    assert(completed.get() == 100) { \"Completed=${completed.get()}\" }\n    assert(maxSeen.get() <= 6) { \"Exceeded capacity: ${maxSeen.get()}\" }\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "ndk_cpp_021_bbc017",
+    "category": "ndk_cpp_cmake",
+    "spec": "Fix the JNI-style UTF-8 C++17 buffer truncation/off-by-one and `std::mutex` race in `telemetry_mux.hpp`/`telemetry_mux.cpp` and ensure `CMakeLists.txt` builds and passes `ctest` across 6 threads.",
+    "workspace_files": {
+      "CMakeLists.txt": "cmake_minimum_required(VERSION 3.16)\nproject(telemetry_mux_jni LANGUAGES CXX)\nset(CMAKE_CXX_STANDARD 17)\nset(CMAKE_CXX_STANDARD_REQUIRED ON)\nenable_testing()\nfind_package(Threads REQUIRED)\nadd_executable(test_telemetry_mux telemetry_mux.cpp test_telemetry_mux.cpp)\ntarget_link_libraries(test_telemetry_mux PRIVATE Threads::Threads)\nadd_test(NAME telemetry_mux_jni_test COMMAND test_telemetry_mux)\n",
+      "telemetry_mux.hpp": "#pragma once\n#include <mutex>\n#include <string>\n\nclass JniStringSlot {\npublic:\n    void set(const char* src);\n    std::string get() const;\n\nprivate:\n    mutable std::mutex mu_;\n    char buf_[32] = {0};\n};\n",
+      "telemetry_mux.cpp": "#include \"telemetry_mux.hpp\"\n#include <cstring>\n\nvoid JniStringSlot::set(const char* src) {\n    // BUG: missing mutex lock and off-by-one null terminator copy\n    if (!src) return;\n    std::size_t n = std::strlen(src);\n    if (n > sizeof(buf_)) n = sizeof(buf_);\n    std::memcpy(buf_, src, n);\n}\n\nstd::string JniStringSlot::get() const {\n    return std::string(buf_);\n}\n",
+      "test_telemetry_mux.cpp": "#include \"telemetry_mux.hpp\"\n#include <cassert>\n#include <iostream>\n#include <thread>\n#include <vector>\n\nint main() {\n    JniStringSlot slot;\n    std::string long_input(64, 'A');\n    slot.set(long_input.c_str());\n    assert(slot.get().size() == 31);\n\n    std::vector<std::thread> workers;\n    for (int t = 0; t < 6; ++t) {\n        workers.emplace_back([&slot, t]() {\n            for (int i = 0; i < 200; ++i) {\n                std::string s = \"token_\" + std::to_string(t);\n                slot.set(s.c_str());\n                assert(!slot.get().empty());\n            }\n        });\n    }\n    for (auto& w : workers) w.join();\n    std::cout << \"ALL TESTS PASSED\\n\";\n    return 0;\n}\n"
+    }
+  },
+  {
+    "id": "masvs_021_b53250",
+    "category": "owasp_masvs",
+    "spec": "Remediate the OWASP MASVS-STORAGE / path-traversal vulnerability in `TokenRegistry.kt`: enforce strict `canonicalPath` sandbox jailing inside `rootDir` (rejecting absolute paths, `../` traversal, and symlinks escaping `rootDir` with `SecurityException`), and ensure all assertions in `Main.kt` pass.",
+    "workspace_files": {
+      "TokenRegistry.kt": "import java.io.File\n\nclass TokenRegistry(private val rootDir: File) {\n    init { rootDir.mkdirs() }\n\n    fun readEntry(relPath: String): String {\n        val target = File(rootDir, relPath)\n        return target.readText(Charsets.UTF_8)\n    }\n\n    fun writeEntry(relPath: String, content: String) {\n        val target = File(rootDir, relPath)\n        target.parentFile?.mkdirs()\n        target.writeText(content, Charsets.UTF_8)\n    }\n}\n",
+      "Main.kt": "import java.io.File\nimport java.nio.file.Files\n\nfun main() {\n    val tmp = Files.createTempDirectory(\"masvs_jail_\").toFile()\n    val outside = Files.createTempFile(\"masvs_secret_\", \".txt\").toFile()\n    outside.writeText(\"TOP_SECRET_BANK_KEY\")\n    val sandbox = File(tmp, \"sandbox\")\n    val store = TokenRegistry(sandbox)\n    store.writeEntry(\"ok.txt\", \"safe-payload\")\n    assert(store.readEntry(\"ok.txt\") == \"safe-payload\")\n\n    var blockedTraversal = false\n    try {\n        store.readEntry(\"../\" + outside.name)\n    } catch (_: SecurityException) {\n        blockedTraversal = true\n    }\n    assert(blockedTraversal) { \"Path traversal was not blocked!\" }\n\n    var blockedAbs = false\n    try {\n        store.readEntry(outside.absolutePath)\n    } catch (_: SecurityException) {\n        blockedAbs = true\n    }\n    assert(blockedAbs) { \"Absolute path escape was not blocked!\" }\n\n    val sym = File(sandbox, \"escape_link.txt\").toPath()\n    Files.createSymbolicLink(sym, outside.toPath())\n    var blockedSymlink = false\n    try {\n        store.readEntry(\"escape_link.txt\")\n    } catch (_: SecurityException) {\n        blockedSymlink = true\n    }\n    assert(blockedSymlink) { \"Symlink escape was not blocked!\" }\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "c_sys_021_c265e1",
+    "category": "c_systems",
+    "spec": "Create `hashmap.c` implementing a thread-safe concurrent integer hash table or bucket counter with per-bucket `pthread_mutex_t` locks, plus a `main()` spawning 6 threads inserting 100 keys each and verifying total count == 600 with `assert`, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "kt_conc_022_fa2fbe",
+    "category": "kotlin_concurrency",
+    "spec": "Create `Main.kt` implementing a thread-safe single-lane `CardDispatcher` coroutine-style task serializer using `ReentrantLock` (`try { ... } finally { lock.unlock() }`) and a `Condition` worker queue so `submit(task)` executes tasks strictly FIFO without concurrent overlap. In `Main.kt`, use `Thread { ... }` and `assert(condition)` (do NOT import `kotlin.test.*` or `kotlinx.coroutines`) to verify 8 threads x 200 tasks complete in-order with zero overlap, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "ndk_cpp_022_b763bf",
+    "category": "ndk_cpp_cmake",
+    "spec": "Fix the lock-ordering deadlock and `CMakeLists.txt` C++17 standard in `telemetry_mux.hpp`/`telemetry_mux.cpp` and `CMakeLists.txt` using `std::scoped_lock` across dual account transfers so `ctest` passes.",
+    "workspace_files": {
+      "CMakeLists.txt": "cmake_minimum_required(VERSION 3.16)\nproject(telemetry_mux_ledger LANGUAGES CXX)\nset(CMAKE_CXX_STANDARD 14)\nset(CMAKE_CXX_STANDARD_REQUIRED ON)\nenable_testing()\nfind_package(Threads REQUIRED)\nadd_executable(test_telemetry_mux telemetry_mux.cpp test_telemetry_mux.cpp)\ntarget_link_libraries(test_telemetry_mux PRIVATE Threads::Threads)\nadd_test(NAME telemetry_mux_deadlock_test COMMAND test_telemetry_mux)\n",
+      "telemetry_mux.hpp": "#pragma once\n#include <cstdint>\n#include <mutex>\n\nstruct NativeAccount {\n    std::mutex mu;\n    int64_t balance{1000};\n};\n\nbool transfer(NativeAccount& from, NativeAccount& to, int64_t amount);\n",
+      "telemetry_mux.cpp": "#include \"telemetry_mux.hpp\"\n\nbool transfer(NativeAccount& from, NativeAccount& to, int64_t amount) {\n    if (&from == &to || amount <= 0) return false;\n    // BUG: locks in caller order -> AB/BA deadlock under concurrent opposite transfers\n    std::lock_guard<std::mutex> g1(from.mu);\n    std::lock_guard<std::mutex> g2(to.mu);\n    if (from.balance < amount) return false;\n    from.balance -= amount;\n    to.balance += amount;\n    return true;\n}\n",
+      "test_telemetry_mux.cpp": "#include \"telemetry_mux.hpp\"\n#include <cassert>\n#include <iostream>\n#include <thread>\n\nint main() {\n    NativeAccount a, b;\n    std::thread t1([&]() {\n        for (int i = 0; i < 200; ++i) transfer(a, b, 1);\n    });\n    std::thread t2([&]() {\n        for (int i = 0; i < 200; ++i) transfer(b, a, 1);\n    });\n    t1.join();\n    t2.join();\n    assert(a.balance + b.balance == 2000);\n    std::cout << \"ALL TESTS PASSED\\n\";\n    return 0;\n}\n"
+    }
+  },
+  {
+    "id": "masvs_022_1e9a01",
+    "category": "owasp_masvs",
+    "spec": "Remediate the OWASP MASVS-CRYPTO vulnerability in `AccountStore.kt`: replace `AES/ECB/PKCS5Padding` and static zero IV with `AES/GCM/NoPadding` using a fresh 12-byte `SecureRandom` IV per encryption and 128-bit authentication tag, storing `iv || ciphertext` so `Main.kt` assertions pass.",
+    "workspace_files": {
+      "AccountStore.kt": "import javax.crypto.Cipher\nimport javax.crypto.spec.SecretKeySpec\n\nclass AccountStore(private val rawKey: ByteArray) {\n    fun encrypt(plaintext: ByteArray): ByteArray {\n        val cipher = Cipher.getInstance(\"AES/ECB/PKCS5Padding\")\n        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(rawKey, \"AES\"))\n        return cipher.doFinal(plaintext)\n    }\n\n    fun decrypt(ciphertext: ByteArray): ByteArray {\n        val cipher = Cipher.getInstance(\"AES/ECB/PKCS5Padding\")\n        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(rawKey, \"AES\"))\n        return cipher.doFinal(ciphertext)\n    }\n}\n",
+      "Main.kt": "import java.io.File\nimport java.security.SecureRandom\n\nfun main() {\n    val src = File(\"AccountStore.kt\").readText()\n    assert(!src.contains(\"AES/ECB\")) { \"Insecure AES/ECB still used!\" }\n    assert(src.contains(\"AES/GCM/NoPadding\")) { \"Must use AES/GCM/NoPadding\" }\n\n    val key = ByteArray(16).also { SecureRandom().nextBytes(it) }\n    val vault = AccountStore(key)\n    val msg = \"routing=021000021;acct=998877\".toByteArray()\n    val c1 = vault.encrypt(msg)\n    val c2 = vault.encrypt(msg)\n    assert(!c1.contentEquals(c2)) { \"Ciphertext must use fresh random IV!\" }\n    assert(vault.decrypt(c1).contentEquals(msg))\n\n    val tampered = c1.copyOf()\n    tampered[tampered.lastIndex] = (tampered.last().toInt() xor 0xFF).toByte()\n    var authFailed = false\n    try {\n        vault.decrypt(tampered)\n    } catch (_: Exception) {\n        authFailed = true\n    }\n    assert(authFailed) { \"GCM tag verification must reject tampered ciphertext!\" }\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "kt_conc_023_10c426",
+    "category": "kotlin_concurrency",
+    "spec": "Create `Main.kt` implementing a thread-safe `EscrowCircuitBreaker(failureThreshold = 3, cooldownMs = 30L)` using `ReentrantLock` (`try { ... } finally { lock.unlock() }`). In `Main.kt`, use `Thread { ... }` and `assert(condition)` (do NOT import `kotlin.test.*`) to verify CLOSED -> OPEN after 3 failures, rejection while OPEN, transition to HALF_OPEN after cooldown, and concurrent calls across 4 threads, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "masvs_023_43b797",
+    "category": "owasp_masvs",
+    "spec": "Remediate the OWASP MASVS-STORAGE insecure SharedPreferences/PII logging flaw in `RemittanceCache.kt`: encrypt stored preference values (never persist plaintext PAN/PIN/tokens to disk) and redact sensitive tokens in `auditSummary()`, passing all assertions in `Main.kt`.",
+    "workspace_files": {
+      "RemittanceCache.kt": "import java.io.File\n\nclass RemittanceCache(private val prefsFile: File, private val masterKey: ByteArray) {\n    private val entries = linkedMapOf<String, String>()\n\n    fun putSecret(key: String, secretValue: String) {\n        entries[key] = secretValue\n        prefsFile.writeText(entries.entries.joinToString(\"\\n\") { \"${it.key}=${it.value}\" })\n    }\n\n    fun getSecret(key: String): String? = entries[key]\n\n    fun auditSummary(): String {\n        return entries.entries.joinToString(\", \") { \"${it.key}=${it.value}\" }\n    }\n}\n",
+      "Main.kt": "import java.io.File\nimport java.nio.file.Files\nimport java.security.SecureRandom\n\nfun main() {\n    val f = Files.createTempFile(\"secure_prefs_\", \".dat\").toFile()\n    val key = ByteArray(16).also { SecureRandom().nextBytes(it) }\n    val store = RemittanceCache(f, key)\n    val pan = \"4111222233334444\"\n    store.putSecret(\"card_pan\", pan)\n    assert(store.getSecret(\"card_pan\") == pan)\n    val disk = f.readText()\n    assert(!disk.contains(pan)) { \"Plaintext PAN persisted on disk!\" }\n    val summary = store.auditSummary()\n    assert(!summary.contains(pan)) { \"Plaintext PAN leaked in auditSummary!\" }\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "c_sys_023_3eec26",
+    "category": "c_systems",
+    "spec": "Create `ringbuf.c` implementing a thread-safe concurrent integer hash table or bucket counter with per-bucket `pthread_mutex_t` locks, plus a `main()` spawning 8 threads inserting 150 keys each and verifying total count == 1200 with `assert`, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "masvs_024_ffe531",
+    "category": "owasp_masvs",
+    "spec": "Remediate the OWASP MASVS-STORAGE hardcoded secret vulnerability in `SettlementCache.kt`: remove the hardcoded signing secret, require an injected/environment secret provider (throwing `IllegalStateException` if blank), use HMAC-SHA256 with constant-time `MessageDigest.isEqual`, and make `verifyToken` pass all assertions in `Main.kt` (do NOT import `kotlin.test.*`).",
+    "workspace_files": {
+      "SettlementCache.kt": "class SettlementCache(private val keyProvider: () -> ByteArray = { ByteArray(0) }) {\n    companion object {\n        private const val HARDCODED_SECRET = \"sk_live_395442_settlement\"\n    }\n\n    fun signToken(payload: String): ByteArray {\n        return (HARDCODED_SECRET + \":\" + payload).toByteArray(Charsets.UTF_8)\n    }\n\n    fun verifyToken(payload: String, sig: ByteArray): Boolean {\n        return signToken(payload).contentEquals(sig)\n    }\n}\n",
+      "Main.kt": "import java.io.File\n\nfun main() {\n    val src = File(\"SettlementCache.kt\").readText()\n    assert(!src.contains(\"sk_live_395442_settlement\")) { \"Hardcoded secret still present!\" }\n    assert(!src.contains(\"HARDCODED_SECRET\")) { \"Hardcoded constant still present!\" }\n\n    var failedEmpty = false\n    try {\n        SettlementCache { ByteArray(0) }.signToken(\"acct=42\")\n    } catch (_: IllegalStateException) {\n        failedEmpty = true\n    }\n    assert(failedEmpty) { \"Blank key must throw IllegalStateException\" }\n\n    val key = \"bank-rotated-ephemeral-key-32bytes\".toByteArray()\n    val store = SettlementCache { key }\n    val sig = store.signToken(\"acct=42\")\n    assert(store.verifyToken(\"acct=42\", sig))\n    assert(!store.verifyToken(\"acct=99\", sig))\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "c_sys_024_a875c8",
+    "category": "c_systems",
+    "spec": "Create `hashmap.c` implementing a thread-safe bounded ring buffer of capacity 8 using `pthread_mutex_t` and `pthread_cond_t`, plus a `main()` spawning 8 producer and 8 consumer threads (100 items per producer) verifying exact sum with `assert`, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "ndk_cpp_025_49e629",
+    "category": "ndk_cpp_cmake",
+    "spec": "Fix the JNI-style UTF-8 C++17 buffer truncation/off-by-one and `std::mutex` race in `bio_cache.hpp`/`bio_cache.cpp` and ensure `CMakeLists.txt` builds and passes `ctest` across 4 threads.",
+    "workspace_files": {
+      "CMakeLists.txt": "cmake_minimum_required(VERSION 3.16)\nproject(bio_cache_jni LANGUAGES CXX)\nset(CMAKE_CXX_STANDARD 17)\nset(CMAKE_CXX_STANDARD_REQUIRED ON)\nenable_testing()\nfind_package(Threads REQUIRED)\nadd_executable(test_bio_cache bio_cache.cpp test_bio_cache.cpp)\ntarget_link_libraries(test_bio_cache PRIVATE Threads::Threads)\nadd_test(NAME bio_cache_jni_test COMMAND test_bio_cache)\n",
+      "bio_cache.hpp": "#pragma once\n#include <mutex>\n#include <string>\n\nclass JniStringSlot {\npublic:\n    void set(const char* src);\n    std::string get() const;\n\nprivate:\n    mutable std::mutex mu_;\n    char buf_[32] = {0};\n};\n",
+      "bio_cache.cpp": "#include \"bio_cache.hpp\"\n#include <cstring>\n\nvoid JniStringSlot::set(const char* src) {\n    // BUG: missing mutex lock and off-by-one null terminator copy\n    if (!src) return;\n    std::size_t n = std::strlen(src);\n    if (n > sizeof(buf_)) n = sizeof(buf_);\n    std::memcpy(buf_, src, n);\n}\n\nstd::string JniStringSlot::get() const {\n    return std::string(buf_);\n}\n",
+      "test_bio_cache.cpp": "#include \"bio_cache.hpp\"\n#include <cassert>\n#include <iostream>\n#include <thread>\n#include <vector>\n\nint main() {\n    JniStringSlot slot;\n    std::string long_input(64, 'A');\n    slot.set(long_input.c_str());\n    assert(slot.get().size() == 31);\n\n    std::vector<std::thread> workers;\n    for (int t = 0; t < 4; ++t) {\n        workers.emplace_back([&slot, t]() {\n            for (int i = 0; i < 200; ++i) {\n                std::string s = \"token_\" + std::to_string(t);\n                slot.set(s.c_str());\n                assert(!slot.get().empty());\n            }\n        });\n    }\n    for (auto& w : workers) w.join();\n    std::cout << \"ALL TESTS PASSED\\n\";\n    return 0;\n}\n"
+    }
+  },
+  {
+    "id": "masvs_025_670e49",
+    "category": "owasp_masvs",
+    "spec": "Remediate the OWASP MASVS-STORAGE / path-traversal vulnerability in `CustodyCache.kt`: enforce strict `canonicalPath` sandbox jailing inside `rootDir` (rejecting absolute paths, `../` traversal, and symlinks escaping `rootDir` with `SecurityException`), and ensure all assertions in `Main.kt` pass.",
+    "workspace_files": {
+      "CustodyCache.kt": "import java.io.File\n\nclass CustodyCache(private val rootDir: File) {\n    init { rootDir.mkdirs() }\n\n    fun readEntry(relPath: String): String {\n        val target = File(rootDir, relPath)\n        return target.readText(Charsets.UTF_8)\n    }\n\n    fun writeEntry(relPath: String, content: String) {\n        val target = File(rootDir, relPath)\n        target.parentFile?.mkdirs()\n        target.writeText(content, Charsets.UTF_8)\n    }\n}\n",
+      "Main.kt": "import java.io.File\nimport java.nio.file.Files\n\nfun main() {\n    val tmp = Files.createTempDirectory(\"masvs_jail_\").toFile()\n    val outside = Files.createTempFile(\"masvs_secret_\", \".txt\").toFile()\n    outside.writeText(\"TOP_SECRET_BANK_KEY\")\n    val sandbox = File(tmp, \"sandbox\")\n    val store = CustodyCache(sandbox)\n    store.writeEntry(\"ok.txt\", \"safe-payload\")\n    assert(store.readEntry(\"ok.txt\") == \"safe-payload\")\n\n    var blockedTraversal = false\n    try {\n        store.readEntry(\"../\" + outside.name)\n    } catch (_: SecurityException) {\n        blockedTraversal = true\n    }\n    assert(blockedTraversal) { \"Path traversal was not blocked!\" }\n\n    var blockedAbs = false\n    try {\n        store.readEntry(outside.absolutePath)\n    } catch (_: SecurityException) {\n        blockedAbs = true\n    }\n    assert(blockedAbs) { \"Absolute path escape was not blocked!\" }\n\n    val sym = File(sandbox, \"escape_link.txt\").toPath()\n    Files.createSymbolicLink(sym, outside.toPath())\n    var blockedSymlink = false\n    try {\n        store.readEntry(\"escape_link.txt\")\n    } catch (_: SecurityException) {\n        blockedSymlink = true\n    }\n    assert(blockedSymlink) { \"Symlink escape was not blocked!\" }\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "c_sys_025_3c84d6",
+    "category": "c_systems",
+    "spec": "Create `ringbuf.c` implementing a thread-safe concurrent integer hash table or bucket counter with per-bucket `pthread_mutex_t` locks, plus a `main()` spawning 4 threads inserting 100 keys each and verifying total count == 400 with `assert`, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "kt_conc_026_2c9936",
+    "category": "kotlin_concurrency",
+    "spec": "Create `Main.kt` implementing a thread-safe single-lane `CardDispatcher` coroutine-style task serializer using `ReentrantLock` (`try { ... } finally { lock.unlock() }`) and a `Condition` worker queue so `submit(task)` executes tasks strictly FIFO without concurrent overlap. In `Main.kt`, use `Thread { ... }` and `assert(condition)` (do NOT import `kotlin.test.*` or `kotlinx.coroutines`) to verify 6 threads x 150 tasks complete in-order with zero overlap, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "ndk_cpp_026_359d5f",
+    "category": "ndk_cpp_cmake",
+    "spec": "Fix the lock-ordering deadlock and `CMakeLists.txt` C++17 standard in `audit_ring.hpp`/`audit_ring.cpp` and `CMakeLists.txt` using `std::scoped_lock` across dual account transfers so `ctest` passes.",
+    "workspace_files": {
+      "CMakeLists.txt": "cmake_minimum_required(VERSION 3.16)\nproject(audit_ring_ledger LANGUAGES CXX)\nset(CMAKE_CXX_STANDARD 14)\nset(CMAKE_CXX_STANDARD_REQUIRED ON)\nenable_testing()\nfind_package(Threads REQUIRED)\nadd_executable(test_audit_ring audit_ring.cpp test_audit_ring.cpp)\ntarget_link_libraries(test_audit_ring PRIVATE Threads::Threads)\nadd_test(NAME audit_ring_deadlock_test COMMAND test_audit_ring)\n",
+      "audit_ring.hpp": "#pragma once\n#include <cstdint>\n#include <mutex>\n\nstruct NativeAccount {\n    std::mutex mu;\n    int64_t balance{1000};\n};\n\nbool transfer(NativeAccount& from, NativeAccount& to, int64_t amount);\n",
+      "audit_ring.cpp": "#include \"audit_ring.hpp\"\n\nbool transfer(NativeAccount& from, NativeAccount& to, int64_t amount) {\n    if (&from == &to || amount <= 0) return false;\n    // BUG: locks in caller order -> AB/BA deadlock under concurrent opposite transfers\n    std::lock_guard<std::mutex> g1(from.mu);\n    std::lock_guard<std::mutex> g2(to.mu);\n    if (from.balance < amount) return false;\n    from.balance -= amount;\n    to.balance += amount;\n    return true;\n}\n",
+      "test_audit_ring.cpp": "#include \"audit_ring.hpp\"\n#include <cassert>\n#include <iostream>\n#include <thread>\n\nint main() {\n    NativeAccount a, b;\n    std::thread t1([&]() {\n        for (int i = 0; i < 200; ++i) transfer(a, b, 1);\n    });\n    std::thread t2([&]() {\n        for (int i = 0; i < 200; ++i) transfer(b, a, 1);\n    });\n    t1.join();\n    t2.join();\n    assert(a.balance + b.balance == 2000);\n    std::cout << \"ALL TESTS PASSED\\n\";\n    return 0;\n}\n"
+    }
+  },
+  {
+    "id": "masvs_026_33b1af",
+    "category": "owasp_masvs",
+    "spec": "Remediate the OWASP MASVS-CRYPTO vulnerability in `VaultPool.kt`: replace `AES/ECB/PKCS5Padding` and static zero IV with `AES/GCM/NoPadding` using a fresh 12-byte `SecureRandom` IV per encryption and 128-bit authentication tag, storing `iv || ciphertext` so `Main.kt` assertions pass.",
+    "workspace_files": {
+      "VaultPool.kt": "import javax.crypto.Cipher\nimport javax.crypto.spec.SecretKeySpec\n\nclass VaultPool(private val rawKey: ByteArray) {\n    fun encrypt(plaintext: ByteArray): ByteArray {\n        val cipher = Cipher.getInstance(\"AES/ECB/PKCS5Padding\")\n        cipher.init(Cipher.ENCRYPT_MODE, SecretKeySpec(rawKey, \"AES\"))\n        return cipher.doFinal(plaintext)\n    }\n\n    fun decrypt(ciphertext: ByteArray): ByteArray {\n        val cipher = Cipher.getInstance(\"AES/ECB/PKCS5Padding\")\n        cipher.init(Cipher.DECRYPT_MODE, SecretKeySpec(rawKey, \"AES\"))\n        return cipher.doFinal(ciphertext)\n    }\n}\n",
+      "Main.kt": "import java.io.File\nimport java.security.SecureRandom\n\nfun main() {\n    val src = File(\"VaultPool.kt\").readText()\n    assert(!src.contains(\"AES/ECB\")) { \"Insecure AES/ECB still used!\" }\n    assert(src.contains(\"AES/GCM/NoPadding\")) { \"Must use AES/GCM/NoPadding\" }\n\n    val key = ByteArray(16).also { SecureRandom().nextBytes(it) }\n    val vault = VaultPool(key)\n    val msg = \"routing=021000021;acct=998877\".toByteArray()\n    val c1 = vault.encrypt(msg)\n    val c2 = vault.encrypt(msg)\n    assert(!c1.contentEquals(c2)) { \"Ciphertext must use fresh random IV!\" }\n    assert(vault.decrypt(c1).contentEquals(msg))\n\n    val tampered = c1.copyOf()\n    tampered[tampered.lastIndex] = (tampered.last().toInt() xor 0xFF).toByte()\n    var authFailed = false\n    try {\n        vault.decrypt(tampered)\n    } catch (_: Exception) {\n        authFailed = true\n    }\n    assert(authFailed) { \"GCM tag verification must reject tampered ciphertext!\" }\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "c_sys_026_a71f75",
+    "category": "c_systems",
+    "spec": "Create `ringbuf.c` implementing a thread-safe bounded ring buffer of capacity 32 using `pthread_mutex_t` and `pthread_cond_t`, plus a `main()` spawning 6 producer and 6 consumer threads (150 items per producer) verifying exact sum with `assert`, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "kt_conc_027_4ef3a9",
+    "category": "kotlin_concurrency",
+    "spec": "Create `Main.kt` implementing a thread-safe `SettlementCircuitBreaker(failureThreshold = 3, cooldownMs = 30L)` using `ReentrantLock` (`try { ... } finally { lock.unlock() }`). In `Main.kt`, use `Thread { ... }` and `assert(condition)` (do NOT import `kotlin.test.*`) to verify CLOSED -> OPEN after 3 failures, rejection while OPEN, transition to HALF_OPEN after cooldown, and concurrent calls across 6 threads, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "ndk_cpp_027_e265c6",
+    "category": "ndk_cpp_cmake",
+    "spec": "Create `CMakeLists.txt`, `bio_cache.hpp`, `bio_cache.cpp`, and `test_bio_cache.cpp` implementing a thread-safe C++17 `NativeRingCache` (capacity 32) guarded by `std::mutex` and `std::lock_guard`, with `ctest` verifying 6 concurrent threads and printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "masvs_027_38f92b",
+    "category": "owasp_masvs",
+    "spec": "Remediate the OWASP MASVS-STORAGE insecure SharedPreferences/PII logging flaw in `TreasuryQueue.kt`: encrypt stored preference values (never persist plaintext PAN/PIN/tokens to disk) and redact sensitive tokens in `auditSummary()`, passing all assertions in `Main.kt`.",
+    "workspace_files": {
+      "TreasuryQueue.kt": "import java.io.File\n\nclass TreasuryQueue(private val prefsFile: File, private val masterKey: ByteArray) {\n    private val entries = linkedMapOf<String, String>()\n\n    fun putSecret(key: String, secretValue: String) {\n        entries[key] = secretValue\n        prefsFile.writeText(entries.entries.joinToString(\"\\n\") { \"${it.key}=${it.value}\" })\n    }\n\n    fun getSecret(key: String): String? = entries[key]\n\n    fun auditSummary(): String {\n        return entries.entries.joinToString(\", \") { \"${it.key}=${it.value}\" }\n    }\n}\n",
+      "Main.kt": "import java.io.File\nimport java.nio.file.Files\nimport java.security.SecureRandom\n\nfun main() {\n    val f = Files.createTempFile(\"secure_prefs_\", \".dat\").toFile()\n    val key = ByteArray(16).also { SecureRandom().nextBytes(it) }\n    val store = TreasuryQueue(f, key)\n    val pan = \"4111222233334444\"\n    store.putSecret(\"card_pan\", pan)\n    assert(store.getSecret(\"card_pan\") == pan)\n    val disk = f.readText()\n    assert(!disk.contains(pan)) { \"Plaintext PAN persisted on disk!\" }\n    val summary = store.auditSummary()\n    assert(!summary.contains(pan)) { \"Plaintext PAN leaked in auditSummary!\" }\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  },
+  {
+    "id": "c_sys_027_246601",
+    "category": "c_systems",
+    "spec": "Create `workq.c` implementing a thread-safe concurrent integer hash table or bucket counter with per-bucket `pthread_mutex_t` locks, plus a `main()` spawning 6 threads inserting 150 keys each and verifying total count == 900 with `assert`, printing 'ALL TESTS PASSED'."
+  },
+  {
+    "id": "kt_conc_028_162591",
+    "category": "kotlin_concurrency",
+    "spec": "Fix the race condition in `AccountAccumulator.kt` by guarding shared state with `ReentrantLock` (using `try { ... } finally { lock.unlock() }`). Do NOT modify the test invariants in `Main.kt`, and do NOT import `kotlin.test.*`. Ensure `compile_and_test` prints 'ALL TESTS PASSED'.",
+    "workspace_files": {
+      "AccountAccumulator.kt": "class AccountAccumulator {\n    private var balance: Long = 0L\n    private val entries = mutableListOf<String>()\n\n    fun record(tag: String, amount: Long) {\n        val next = balance + amount\n        Thread.yield()\n        balance = next\n        entries.add(tag)\n    }\n\n    fun totalBalance(): Long = balance\n    fun entryCount(): Int = entries.size\n}\n",
+      "Main.kt": "import java.util.concurrent.CountDownLatch\n\nfun main() {\n    val acc = AccountAccumulator()\n    val start = CountDownLatch(1)\n    val workers = (0 until 8).map { tid ->\n        Thread {\n            start.await()\n            for (i in 0 until 150) {\n                acc.record(\"t$tid-$i\", 1L)\n            }\n        }\n    }\n    workers.forEach { it.start() }\n    start.countDown()\n    workers.forEach { it.join() }\n    assert(acc.totalBalance() == 1200L) { \"Expected 1200, got ${acc.totalBalance()}\" }\n    assert(acc.entryCount() == 1200) { \"Expected 1200 entries, got ${acc.entryCount()}\" }\n    println(\"ALL TESTS PASSED\")\n}\n"
+    }
+  }
+]

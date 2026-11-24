@@ -7,6 +7,8 @@ import tempfile
 import unittest
 
 import eval as eval_harness
+import generate_tasks
+import harvest_rlvr
 import mcp_server
 import orchestrator
 import rlvr_mlx
@@ -18,8 +20,8 @@ ORCHESTRATOR = os.path.join(HARNESS_DIR, "orchestrator.py")
 
 class TestHarness(unittest.TestCase):
     def test_py_compile(self):
-        py_compile.compile(MCP_SERVER, doraise=True)
-        py_compile.compile(ORCHESTRATOR, doraise=True)
+        for fname in ("mcp_server.py", "orchestrator.py", "rlvr_mlx.py", "eval.py", "generate_tasks.py", "harvest_rlvr.py"):
+            py_compile.compile(os.path.join(HARNESS_DIR, fname), doraise=True)
 
     def test_mcp_stdio_initialize_tools_and_path_jail(self):
         with tempfile.TemporaryDirectory() as td:
@@ -83,12 +85,22 @@ class TestHarness(unittest.TestCase):
             mcp = orchestrator.MCPClient(MCP_SERVER, workspace=td)
             try:
                 self.assertIn("keep_me.txt", mcp.call_tool("find_files", {"pattern": "*.txt"}))
+                self.assertIn("keep_me.txt", mcp.call_tool("find_files", {"pattern": "*.md *.txt"}))
+                self.assertIn("keep_me.txt", mcp.call_tool("find_files", {"pattern": "*.nonexistent"}))
                 self.assertIn("keep_me.txt:2:beta", mcp.call_tool("grep_search", {"query": "beta"}))
                 self.assertIn("2: beta", mcp.call_tool("read_file", {"path": "keep_me.txt"}))
 
                 edit_out = mcp.call_tool("edit_file", {"path": "keep_me.txt", "old_str": "beta", "new_str": "BETA"})
                 self.assertIn("Edited keep_me.txt successfully", edit_out)
                 self.assertIn("2: BETA", mcp.call_tool("read_file", {"path": "keep_me.txt"}))
+
+                mcp.call_tool("write_file", {"path": "Indented.kt", "content": "fun f() {\n    val x = 1\n    val y = 2\n}\n"})
+                indent_edit = mcp.call_tool(
+                    "edit_file",
+                    {"path": "Indented.kt", "old_str": "val x = 1\nval y = 2", "new_str": "val x = 10\nval y = 20"},
+                )
+                self.assertIn("Edited Indented.kt successfully", indent_edit)
+                self.assertIn("    val x = 10", mcp.call_tool("read_file", {"path": "Indented.kt"}))
 
                 mcp.call_tool("write_file", {"path": "sub/new.txt", "content": "hello\n"})
                 self.assertTrue(os.path.exists(sentinel))
@@ -170,7 +182,7 @@ class TestHarness(unittest.TestCase):
                 {"role": "user", "content": "Write Main.kt"},
                 {
                     "role": "assistant",
-                    "content": "",
+                    "content": '{"name": "write_file", "arguments": {"path": "Main.kt"}}',
                     "tool_calls": [
                         {"id": "c1", "type": "function", "function": {"name": "write_file", "arguments": "{\"path\": \"Main.kt\"}"}}
                     ],
@@ -178,15 +190,86 @@ class TestHarness(unittest.TestCase):
                 {"role": "tool", "tool_call_id": "c1", "content": "Wrote Main.kt"},
             ]
             with open(traj_path, "w", encoding="utf-8") as f:
+                # Legacy row without diff should be filtered out by default
+                f.write(json.dumps({"spec": "legacy", "git_diff": "No changes.", "messages": sample_msgs}) + "\n")
                 for i in range(3):
-                    f.write(json.dumps({"spec": f"task {i}", "messages": sample_msgs}) + "\n")
+                    f.write(json.dumps({"spec": f"task {i}", "git_diff": "diff --git a/Main.kt b/Main.kt", "messages": sample_msgs}) + "\n")
 
             n_train, n_valid = rlvr_mlx.export_mlx_dataset(traj_path, out_dir, val_split=0.2)
             self.assertEqual((n_train, n_valid), (2, 1))
             with open(os.path.join(out_dir, "train.jsonl"), "r", encoding="utf-8") as f:
                 row = json.loads(f.readline())
             self.assertEqual(len(row["messages"]), 4)
-            self.assertIn("write_file", row["messages"][2]["content"])
+            self.assertIn("tools", row)
+            self.assertEqual(len(row["tools"]), len(mcp_server.TOOLS))
+            assistant_msg = row["messages"][2]
+            self.assertEqual(assistant_msg["content"], "")
+            self.assertEqual(assistant_msg["tool_calls"][0]["function"]["name"], "write_file")
+            self.assertEqual(assistant_msg["tool_calls"][0]["function"]["arguments"], {"path": "Main.kt"})
+
+    def test_modelfile_parity(self):
+        modelfile_path = os.path.join(HARNESS_DIR, "Modelfile.custom")
+        self.assertTrue(os.path.isfile(modelfile_path))
+        with open(modelfile_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertTrue(content.startswith("FROM "))
+        self.assertEqual(content.split("\n", 1)[1], rlvr_mlx.render_modelfile().split("\n", 1)[1])
+        for marker in (
+            "<|im_start|>system",
+            "<tools>",
+            "<tool_call>",
+            "<tool_response>",
+            "<|im_end|>",
+            "SYSTEM You are Qwen, created by Alibaba Cloud. You are a helpful assistant.",
+            'PARAMETER stop "<|im_end|>"',
+        ):
+            self.assertIn(marker, content)
+
+    def test_generate_tasks_deterministic_and_loadable(self):
+        tasks_a = generate_tasks.generate_tasks(count=120, seed=42)
+        tasks_b = generate_tasks.generate_tasks(count=120, seed=42)
+        self.assertEqual(tasks_a, tasks_b)
+        self.assertEqual(len(tasks_a), 120)
+        self.assertEqual(len({t["id"] for t in tasks_a}), 120)
+        self.assertEqual(len({t["spec"] for t in tasks_a}), 120)
+        self.assertEqual(
+            {t["category"] for t in tasks_a},
+            {"kotlin_concurrency", "ndk_cpp_cmake", "owasp_masvs", "c_systems"},
+        )
+        with tempfile.TemporaryDirectory() as td:
+            tasks_json = os.path.join(td, "tasks.json")
+            with open(tasks_json, "w", encoding="utf-8") as f:
+                json.dump(tasks_a, f)
+            loaded = eval_harness.load_eval_tasks(tasks_json)
+            self.assertEqual(len(loaded), 120)
+
+    def test_generated_workspace_tasks_fail_baseline_compile_and_test(self):
+        tasks = generate_tasks.generate_tasks(count=16, seed=42)
+        by_cat = {}
+        for t in tasks:
+            if t.get("workspace_files") and t["category"] not in by_cat:
+                by_cat[t["category"]] = t
+        self.assertEqual(set(by_cat.keys()), {"kotlin_concurrency", "ndk_cpp_cmake", "owasp_masvs"})
+
+        for cat, task in by_cat.items():
+            with tempfile.TemporaryDirectory() as td:
+                eval_harness.materialize_workspace(td, task["workspace_files"])
+                cmd, timeout = mcp_server.build_test_command(td, sandbox="host")
+                res = subprocess.run(cmd, cwd=td, capture_output=True, text=True, timeout=timeout)
+                self.assertNotEqual(res.returncode, 0, f"Baseline for {cat} ({task['id']}) unexpectedly passed!")
+
+    def test_harvest_rlvr_helpers(self):
+        with tempfile.TemporaryDirectory() as td:
+            traj = os.path.join(td, "trajectories.jsonl")
+            with open(traj, "w", encoding="utf-8") as f:
+                f.write(json.dumps({"spec": "old_spec", "git_diff": "No changes.", "messages": []}) + "\n")
+                f.write(json.dumps({"spec": "good_spec", "git_diff": "diff --git a/x b/x", "messages": []}) + "\n")
+
+            self.assertEqual(harvest_rlvr.load_existing_specs(traj), {"good_spec"})
+            kept, removed = harvest_rlvr.purge_legacy_trajectories(traj)
+            self.assertEqual((kept, removed), (1, 1))
+            self.assertTrue(os.path.isfile(traj + ".bak"))
+            self.assertEqual(harvest_rlvr.load_existing_specs(traj), {"good_spec"})
 
     def test_eval_harness_parsing_and_summary(self):
         sample_stdout = (
@@ -221,6 +304,26 @@ class TestHarness(unittest.TestCase):
             self.assertIn(f"{td}:/workspace", cmd)
             self.assertIn("gcc:14", cmd)
             self.assertEqual(timeout, 30)
+
+    def test_mcp_cmake_ctest_execution(self):
+        with tempfile.TemporaryDirectory() as td:
+            with open(os.path.join(td, "CMakeLists.txt"), "w", encoding="utf-8") as f:
+                f.write(
+                    "cmake_minimum_required(VERSION 3.16)\n"
+                    "project(smoke LANGUAGES CXX)\n"
+                    "set(CMAKE_CXX_STANDARD 17)\n"
+                    "enable_testing()\n"
+                    "add_executable(smoke_test main.cpp)\n"
+                    "add_test(NAME smoke COMMAND smoke_test)\n"
+                )
+            with open(os.path.join(td, "main.cpp"), "w", encoding="utf-8") as f:
+                f.write("#include <cassert>\nint main() { assert(1 + 1 == 2); return 0; }\n")
+            mcp = orchestrator.MCPClient(MCP_SERVER, workspace=td)
+            try:
+                out = mcp.call_tool("compile_and_test", {})
+                self.assertIn("EXIT_CODE: 0", out)
+            finally:
+                mcp.close()
 
 
 if __name__ == "__main__":

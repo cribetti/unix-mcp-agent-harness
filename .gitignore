@@ -5,8 +5,9 @@ workspace/
 saved_*/
 .DS_Store
 trajectories.jsonl
+*.bak
 mlx_data/
 adapters/
 fused_model/
 *.gguf
-eval_results.json
+eval_results*.json

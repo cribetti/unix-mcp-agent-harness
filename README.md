@@ -60,11 +60,15 @@ python3 -m unittest test_harness.py -v
 # Export Critic-approved trajectories for Apple Silicon MLX LoRA fine-tuning
 python3 rlvr_mlx.py
 
-# Train, fuse, and export a custom .gguf for Android / Ollama
-python3 rlvr_mlx.py --model mlx-community/Qwen2.5-Coder-1.5B-Instruct-4bit --train --fuse --export-gguf ./custom-qwen.gguf
+# Train 8-bit LoRA, fuse, quantize to Q4_K_M, and write parity-audited Modelfile.custom
+python3 rlvr_mlx.py --train --fuse --export-gguf ./custom-qwen-7b-q4_k_m.gguf --outtype f16 --quantize Q4_K_M --write-modelfile ./Modelfile.custom
+
+# Generate 120 deterministic tasks (100 train + 20 eval) and batch-harvest trajectories
+python3 generate_tasks.py --count 120 --seed 42 --out generated_tasks.json --eval-out generated_eval_tasks.json --eval-count 20
+python3 harvest_rlvr.py --tasks-file generated_tasks.json --limit 20 --model qwen2.5-coder:7b
 
 # Benchmark models on the held-out evaluation suite
-python3 eval.py --models qwen2.5-coder:7b qwen3:8b
+python3 eval.py --models qwen2.5-coder:7b custom-qwen
 ```
 
 ## Hardware & Memory Telemetry (Apple Silicon)

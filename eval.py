@@ -71,10 +71,34 @@ def load_eval_tasks(tasks_file: str | None) -> list[dict]:
         if isinstance(item, str):
             tasks.append({"id": f"task_{idx}", "spec": item})
         elif isinstance(item, dict) and "spec" in item:
-            tasks.append({"id": item.get("id", f"task_{idx}"), "spec": item["spec"]})
+            entry = {"id": item.get("id", f"task_{idx}"), "spec": item["spec"]}
+            if isinstance(item.get("workspace_files"), dict):
+                entry["workspace_files"] = item["workspace_files"]
+            tasks.append(entry)
         else:
             raise ValueError(f"Invalid task entry at index {idx - 1}")
     return tasks
+
+
+def materialize_workspace(workspace_dir: str, workspace_files: dict[str, str]) -> str:
+    """Populate a temporary git-initialized workspace for workspace-backed eval/harvest tasks."""
+    os.makedirs(workspace_dir, exist_ok=True)
+    for rel_path, content in workspace_files.items():
+        norm = os.path.normpath(rel_path)
+        if os.path.isabs(norm) or norm.startswith(".."):
+            raise ValueError(f"Invalid workspace_files path: {rel_path}")
+        full_path = os.path.join(workspace_dir, norm)
+        os.makedirs(os.path.dirname(full_path), exist_ok=True)
+        with open(full_path, "w", encoding="utf-8") as f:
+            f.write(content)
+    subprocess.run(
+        "git init -q && git config user.email 'agent@local' && git config user.name 'Agent' "
+        "&& git add -A && git commit --allow-empty -m 'baseline' -q",
+        shell=True,
+        cwd=workspace_dir,
+        check=True,
+    )
+    return workspace_dir
 
 
 def parse_orchestrator_output(stdout: str) -> tuple[bool, int]:
@@ -144,20 +168,26 @@ def main():
             runs = []
             for idx, task in enumerate(tasks, 1):
                 t0 = time.perf_counter()
+                cmd = [
+                    sys.executable,
+                    orchestrator_script,
+                    "--model",
+                    model,
+                    "--max-turns",
+                    str(args.max_turns),
+                    "--trajectories",
+                    temp_traj,
+                    "--task",
+                    task["spec"],
+                ]
+                task_ws_cm = None
+                if task.get("workspace_files"):
+                    task_ws_cm = tempfile.TemporaryDirectory()
+                    ws_dir = materialize_workspace(task_ws_cm.name, task["workspace_files"])
+                    cmd.extend(["--workspace", ws_dir])
                 try:
                     res = subprocess.run(
-                        [
-                            sys.executable,
-                            orchestrator_script,
-                            "--model",
-                            model,
-                            "--max-turns",
-                            str(args.max_turns),
-                            "--trajectories",
-                            temp_traj,
-                            "--task",
-                            task["spec"],
-                        ],
+                        cmd,
                         cwd=here,
                         capture_output=True,
                         text=True,
@@ -170,6 +200,9 @@ def main():
                     _, turns = parse_orchestrator_output(stdout)
                     passed = False
                     timed_out = True
+                finally:
+                    if task_ws_cm is not None:
+                        task_ws_cm.cleanup()
                 dt = time.perf_counter() - t0
                 runs.append({
                     "id": task["id"],

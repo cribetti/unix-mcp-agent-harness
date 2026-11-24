@@ -82,6 +82,7 @@ def stream_turn(
     messages: list[dict],
     tools: list[dict] | None = None,
     temp: float = 0.1,
+    reasoning_effort: str | None = "none",
 ):
     """Stream tokens live to stdout with a 1-second ticking heartbeat and token cap."""
     t0 = time.perf_counter()
@@ -96,14 +97,21 @@ def stream_turn(
     timer.start()
 
     try:
-        stream = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            tools=tools,
-            temperature=temp,
-            max_tokens=4096,
-            stream=True,
-        )
+        kwargs = {
+            "model": model,
+            "messages": messages,
+            "tools": tools,
+            "temperature": temp,
+            "max_tokens": 4096,
+            "stream": True,
+        }
+        if reasoning_effort:
+            kwargs["reasoning_effort"] = reasoning_effort
+        try:
+            stream = client.chat.completions.create(**kwargs)
+        except TypeError:
+            kwargs.pop("reasoning_effort", None)
+            stream = client.chat.completions.create(**kwargs)
 
         content_parts = []
         tool_acc = {}
@@ -348,11 +356,10 @@ def main():
 
     coder_system = (
         "You are a systems engineer. Use tool calls only—never output code in chat text. "
-        "In existing or multi-file repositories, first navigate with `find_files`, `grep_search`, "
-        "and paged `read_file` (`start_line`/`end_line`) to inspect relevant files, then apply "
-        "surgical patches with `edit_file` (or create new files with `write_file`) before running "
-        "`compile_and_test`. For standalone Kotlin tests, use built-in `assert(condition)` directly "
-        "and NEVER import `kotlin.test.*`. /no_think"
+        "In existing or multi-file repositories, inspect relevant files (including tests and build files) with `read_file`, "
+        "then apply surgical patches with `edit_file` (or rewrite the complete file with `write_file` when refactoring "
+        "short files <100 lines in one shot) before running `compile_and_test`. "
+        "For standalone Kotlin tests, use built-in `assert(condition)` directly and NEVER import `kotlin.test.*`. /no_think"
     )
     if agents_md:
         coder_system += f"\n\nTarget Repository AGENTS.md:\n{agents_md}"
@@ -362,13 +369,20 @@ def main():
     mcp = MCPClient(mcp_script, workspace=workspace, sandbox=args.sandbox)
     openai_tools = mcp.get_openai_tools()
 
+    initial_user = spec
+    if is_external_workspace:
+        tree_listing = mcp.call_tool("find_files", {"pattern": "*", "max_results": 40})
+        if tree_listing and not tree_listing.startswith("No files matched"):
+            initial_user = f"{spec}\n\nWorkspace files:\n{tree_listing}"
+
     messages = [
         {"role": "system", "content": coder_system},
-        {"role": "user", "content": spec},
+        {"role": "user", "content": initial_user},
     ]
 
     try:
         critic_rejections = 0
+        last_call_sig = None
         for turn in range(args.max_turns):
             print(f"\n=== [Coder Turn {turn+1} | {args.model}] ===", flush=True)
             msg = stream_turn(client, args.model, messages, tools=openai_tools, temp=0.1)
@@ -392,7 +406,15 @@ def main():
                 for tc in msg.tool_calls:
                     call_args = json.loads(tc.function.arguments)
                     print(f"  -> MCP {tc.function.name}({list(call_args.keys())})", flush=True)
-                    out = mcp.call_tool(tc.function.name, call_args)
+                    call_sig = (tc.function.name, json.dumps(call_args, sort_keys=True))
+                    if call_sig == last_call_sig and tc.function.name != "compile_and_test":
+                        out = (
+                            f"WARNING: Duplicate consecutive call to `{tc.function.name}` with identical arguments blocked. "
+                            "Use a different approach (e.g., `write_file` to write the complete corrected file or `compile_and_test` to verify)."
+                        )
+                    else:
+                        last_call_sig = call_sig
+                        out = mcp.call_tool(tc.function.name, call_args)
                     if tc.function.name == "compile_and_test":
                         print("\n".join(f"     {line}" for line in out.splitlines()[:25]), flush=True)
                         if "EXIT_CODE: 0" in out:

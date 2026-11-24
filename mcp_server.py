@@ -139,16 +139,21 @@ def _iter_workspace_files(root_dir: str):
 
 
 def tool_find_files(args: dict) -> str:
-    pattern = args.get("pattern") or "*"
+    pattern = (args.get("pattern") or "*").strip()
     max_results = int(args.get("max_results") or 100)
-    matches = list()
-    for rel, _ in _iter_workspace_files(WORKSPACE):
+    patterns = [p for p in re.split(r"[\s,]+", pattern) if p] or ["*"]
+    all_rels = [rel for rel, _ in _iter_workspace_files(WORKSPACE)]
+    matches = []
+    for rel in all_rels:
         fname = os.path.basename(rel)
-        if fnmatch.fnmatch(fname, pattern) or fnmatch.fnmatch(rel, pattern):
+        if any(fnmatch.fnmatch(fname, pat) or fnmatch.fnmatch(rel, pat) for pat in patterns):
             matches.append(rel)
             if len(matches) >= max_results:
                 break
     if not matches:
+        if all_rels:
+            preview = "\n".join(all_rels[:25])
+            return f"No files matched pattern '{pattern}'. Workspace files:\n{preview}"
         return f"No files matched pattern '{pattern}'."
     suffix = f"\n... (truncated at {max_results} results)" if len(matches) == max_results else ""
     return "\n".join(matches) + suffix
@@ -236,6 +241,50 @@ def tool_read_file(args: dict) -> str:
         text = text[:7000] + f"\n... [truncated; file has {total} lines—use start_line/end_line to read further]"
     return text or "(empty file)"
 
+def _try_unique_indent_edit(content: str, old_str: str, new_str: str) -> tuple[str | None, str | None]:
+    """Fallback when exact match fails solely due to uniform leading indentation mismatch."""
+    old_lines = old_str.splitlines()
+    if not old_lines or not any(l.strip() for l in old_lines):
+        return None, None
+
+    content_lines = content.splitlines()
+    n = len(old_lines)
+    if n > len(content_lines):
+        return None, None
+
+    stripped_old = [l.strip() for l in old_lines]
+    hit_indices = [
+        i for i in range(len(content_lines) - n + 1)
+        if [l.strip() for l in content_lines[i : i + n]] == stripped_old
+    ]
+    if len(hit_indices) > 1:
+        hits = ", ".join(str(i + 1) for i in hit_indices)
+        return None, f"ERROR: old_str matched {len(hit_indices)} blocks ignoring indentation (lines {hits}). Include more surrounding context."
+    if not hit_indices:
+        return None, None
+
+    start_idx = hit_indices[0]
+    matched_block = content_lines[start_idx : start_idx + n]
+    target_indent = next((l[: len(l) - len(l.lstrip(" \t"))] for l in matched_block if l.strip()), "")
+    old_indent = next((l[: len(l) - len(l.lstrip(" \t"))] for l in old_lines if l.strip()), "")
+
+    new_lines_raw = new_str.splitlines()
+    reindented = []
+    for line in new_lines_raw:
+        if not line.strip():
+            reindented.append("")
+        elif old_indent and line.startswith(old_indent):
+            reindented.append(target_indent + line[len(old_indent) :])
+        elif not old_indent and not line.startswith(target_indent):
+            reindented.append(target_indent + line)
+        else:
+            reindented.append(line)
+
+    merged = content_lines[:start_idx] + reindented + content_lines[start_idx + n :]
+    updated = "\n".join(merged) + ("\n" if content.endswith("\n") else "")
+    return updated, None
+
+
 def tool_edit_file(args: dict) -> str:
     p = safe_path(args["path"])
     if not os.path.exists(p):
@@ -251,11 +300,19 @@ def tool_edit_file(args: dict) -> str:
 
     occurrences = content.count(old_str)
     if occurrences == 0:
-        return (
-            f"ERROR: old_str was not found verbatim in {args['path']}. "
-            "Call read_file first and copy exact indentation and lines."
+        updated, indent_err = _try_unique_indent_edit(content, old_str, new_str)
+        if indent_err:
+            return indent_err
+        if updated is None:
+            return (
+                f"ERROR: old_str was not found verbatim in {args['path']}. "
+                "Call read_file first and copy exact indentation and lines, or use write_file to rewrite the file."
+            )
+        edit_start_line = next(
+            (i + 1 for i, (a, b) in enumerate(zip(content.splitlines(), updated.splitlines())) if a != b),
+            1,
         )
-    if occurrences > 1:
+    elif occurrences > 1:
         lines = content.splitlines()
         first_old_line = old_str.splitlines()[0]
         hits = [str(i + 1) for i, l in enumerate(lines) if first_old_line in l]
@@ -263,8 +320,10 @@ def tool_edit_file(args: dict) -> str:
             f"ERROR: old_str matched {occurrences} times in {args['path']} (around lines {', '.join(hits)}). "
             "Include 2-3 surrounding lines in old_str so the match is unique."
         )
+    else:
+        updated = content.replace(old_str, new_str, 1)
+        edit_start_line = content[: content.index(old_str)].count("\n") + 1
 
-    updated = content.replace(old_str, new_str, 1)
     if p.endswith(".kt"):
         updated = sanitize_kotlin(updated)
 
@@ -272,7 +331,6 @@ def tool_edit_file(args: dict) -> str:
         f.write(updated)
 
     updated_lines = updated.splitlines()
-    edit_start_line = content[: content.index(old_str)].count("\n") + 1
     ctx_start = max(1, edit_start_line - 2)
     ctx_end = min(len(updated_lines), edit_start_line + len(new_str.splitlines()) + 2)
     preview = "\n".join(f"{i:4d}: {updated_lines[i - 1]}" for i in range(ctx_start, ctx_end + 1))
@@ -290,6 +348,20 @@ def tool_write_file(args: dict) -> str:
     return f"Wrote {len(content)} bytes to {args['path']}"
 
 
+def _find_cmake_bin() -> str:
+    """Locate cmake on PATH or in Android SDK cmake prebuilts."""
+    found = shutil.which("cmake")
+    if found:
+        return "cmake"
+    sdk_root = os.path.expanduser("~/Library/Android/sdk/cmake")
+    if os.path.isdir(sdk_root):
+        for ver in sorted(os.listdir(sdk_root), reverse=True):
+            cand = os.path.join(sdk_root, ver, "bin", "cmake")
+            if os.path.isfile(cand) and os.access(cand, os.X_OK):
+                return cand
+    return "cmake"
+
+
 def build_test_command(
     workspace: str,
     sandbox: str = "host",
@@ -297,11 +369,27 @@ def build_test_command(
 ) -> tuple[list[str], int]:
     """Build the compile_and_test command and timeout for host or --network=none docker execution."""
     gradlew = os.path.join(workspace, "gradlew")
+    cmakelists = os.path.join(workspace, "CMakeLists.txt")
+    entries = os.listdir(workspace)
     if os.path.exists(gradlew):
         cmd = "chmod +x ./gradlew && ./gradlew testDebugUnitTest --stacktrace"
         timeout_sec = 180
         default_img = "eclipse-temurin:21"
-    elif any(f.endswith(".kt") for f in os.listdir(workspace)):
+    elif os.path.exists(cmakelists):
+        cmake_bin = "cmake" if sandbox == "docker" else _find_cmake_bin()
+        ctest_bin = (
+            "ctest"
+            if sandbox == "docker" or cmake_bin == "cmake"
+            else os.path.join(os.path.dirname(cmake_bin), "ctest")
+        )
+        cmd = (
+            f'"{cmake_bin}" -S . -B build && '
+            f'"{cmake_bin}" --build build && '
+            f'"{ctest_bin}" --test-dir build --output-on-failure'
+        )
+        timeout_sec = 60
+        default_img = "gcc:14"
+    elif any(f.endswith(".kt") for f in entries):
         cmd = (
             'KLIB=$(dirname "$(realpath "$(which kotlinc)")")/../libexec/lib; '
             'CP=$(ls "$KLIB"/kotlin-test*.jar 2>/dev/null | tr "\\n" ":"); '
@@ -310,6 +398,10 @@ def build_test_command(
         )
         timeout_sec = 45
         default_img = "eclipse-temurin:21"
+    elif any(f.endswith((".cpp", ".cc")) for f in entries):
+        cmd = "g++ -std=c++17 -O2 -g -Wall -pthread *.cpp -o test_app && ./test_app"
+        timeout_sec = 30
+        default_img = "gcc:14"
     else:
         cmd = "gcc -O2 -g -Wall -pthread *.c -o test_app && ./test_app"
         timeout_sec = 30
@@ -365,7 +457,7 @@ def tool_git_diff() -> str:
     }
     untracked_or_src = [
         rel for rel, _ in _iter_workspace_files(WORKSPACE)
-        if os.path.splitext(rel)[1].lower() in source_exts
+        if os.path.splitext(rel)[1].lower() in source_exts or os.path.basename(rel) == "CMakeLists.txt"
     ]
     if untracked_or_src:
         subprocess.run(
