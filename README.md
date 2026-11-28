@@ -71,17 +71,20 @@ python3 harvest_rlvr.py --tasks-file generated_tasks.json --limit 20 --model qwe
 python3 eval.py --models qwen2.5-coder:7b custom-qwen
 ```
 
-## Hardware & Memory Telemetry (Apple Silicon)
+## Hardware, Memory & RLVR Benchmark Telemetry (Apple Silicon)
 Tested on a **2025 MacBook Air (24GB Unified Memory)**:
 * **`qwen3:8b` (~5.2 GB footprint):** Runs 100% on Metal GPU with zero SSD swap pressure, completing multi-file C generation, compilation, and Critic verification in 2 Coder turns.
 * **Context Sizing:** Configured for `8192`–`16384` token context windows to hold full source diffs and compiler logs without exceeding unified memory ceilings.
+* **Verified Phase 1 `eval.py` Results (36 RLVR trajectories → 8-bit LoRA → `Q4_K_M`, `AUDIT_VERDICT: APPROVED`):**
+  * **6-Task Default Suite (`eval_results.json`):** `custom-qwen` **`2/6 (33.3%)`** (`avg_turns=6.0`, `50.6s/task`) vs. base `qwen2.5-coder:7b` **`1/6 (16.7%)`** (`avg_turns=6.33`, `58.1s/task`).
+  * **20-Task Held-Out Domain Suite (`eval_results_domain.json`):** `custom-qwen` **`3/20 (15.0%)`** (`avg_turns=8.8`, `102.4s/task`, including held-out C++/CMake JNI fix `ndk_cpp_031_14980c`) vs. base `qwen2.5-coder:7b` **`2/20 (10.0%)`** (`avg_turns=8.65`, `88.9s/task`).
 
 ## Roadmap
 * [x] Zero-dependency MCP `stdio` JSON-RPC 2.0 server with symlink-safe path-jail isolation (`mcp_server.py`)
-* [x] Fresh-context Critic agent auditing `git diff` + deterministic exit codes (`orchestrator.py`)
+* [x] Fresh-context Critic agent auditing `git diff` + deterministic diff/JUnit XML pre-checks (`orchestrator.py`)
 * [x] Live token streaming, `--workspace` / `--task` flags, and `AGENTS.md` auto-loading
-* [x] Fast offline unit & security test suite (`test_harness.py`)
-* [x] Layer 4 RLVR trajectory logging (`trajectories.jsonl`) + Apple MLX LoRA exporter/runner/GGUF export (`rlvr_mlx.py`)
+* [x] Fast offline unit & security test suite (`test_harness.py`, 17/17 passing)
+* [x] Layer 4 RLVR trajectory logging (`trajectories.jsonl`), deterministic task generator (`generate_tasks.py`), batch harvester (`harvest_rlvr.py`), audit packet (`audit_packet.py`), and 8-bit MLX LoRA → `Q4_K_M` GGUF export (`rlvr_mlx.py`, `Modelfile.custom`)
 * [x] Held-out evaluation harness (`eval.py`) for comparing base vs. fine-tuned models
 * [x] Containerized Linux execution backend (`--sandbox docker` with `--network=none` in `mcp_server.py` / `orchestrator.py`)
 * [x] **Milestone 3:** Native on-device Android NDK (`llama.cpp` + JNI + Jetpack Compose) local agent port (`../android-ndk-agent`)
