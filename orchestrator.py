@@ -35,6 +35,7 @@ class MCPClient:
         security_log: str | None = None,
         audit_log: str | None = None,
         inherit_audit_env: bool = True,
+        quiet_stderr: bool = False,
     ):
         cmd = [sys.executable, script_path, "--sandbox", sandbox]
         if workspace:
@@ -50,6 +51,7 @@ class MCPClient:
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL if quiet_stderr else None,
             text=True,
             bufsize=1,
             env=child_env,
@@ -493,10 +495,10 @@ def classify_security_block(reason: str) -> str:
     low = (reason or "").lower()
     if "symlink" in low:
         return "symlink_escape"
-    if "sensitive file" in low or ".env" in low or "credential" in low:
-        return "sensitive_file"
     if "escapes workspace" in low or "null byte" in low or "traversal" in low:
         return "path_traversal"
+    if "sensitive file" in low or ".env" in low or "credential" in low:
+        return "sensitive_file"
     if "command" in low or "socket" in low or "metacharacter" in low or "compile_and_test" in low:
         return "command_injection"
     return "security_violation"

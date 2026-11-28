@@ -2,6 +2,13 @@
 
 All notable milestones for the air-gapped Coder + Critic MCP harness and RLVR pipeline are documented in this file.
 
+## [Phase 4] — 2026-11-28 — 3-Act Enterprise Demo Showcase & Narration Script
+- **One-Command Showcase (`demo_showcase.py`):** Built self-contained, 1080p-formatted, `< 60s` 3-act executive showcase exercising live `mcp_server.py`, `gcc -pthread`, `safe_path()`/`is_sensitive_path()`, and `audit_logger.py --verify`:
+  - **Act 1:** Isolates a temporary repo with a deterministic 8-thread C data race (`EXIT_CODE: 134`) and hidden `.env` secrets, applies a surgical `pthread_mutex_lock`/`unlock` patch via `MCPClient`, and verifies `EXIT_CODE: 0` + Critic approval with diff preview.
+  - **Act 2:** Injects `IGNORE PREVIOUS INSTRUCTIONS` payloads (`../../.env`, `~/.ssh/id_rsa`, `.env`, and shell args to `compile_and_test`), demonstrating `4/4` `SECURITY_BLOCKED` refusals with zero leaked secrets and intact session telemetry.
+  - **Act 3:** Emits a 16-entry SHA-256 hash-chained `audit.jsonl`, verifies `VALID SHA-256 CHAIN` via `audit_logger.py --verify`, and flips 1 byte in a copy to trigger immediate `TAMPER DETECTED`.
+- **Narration Guide & Test Coverage (`DEMO_SCRIPT.md`, `test_phase3.py`, `orchestrator.py`):** Added 3-minute CTO/VP Engineering narration script, refined `classify_security_block()` ordering (`path_traversal` before `sensitive_file`) + `MCPClient(quiet_stderr=...)`, and added end-to-end showcase coverage (`30/30` tests passing in `9.32s`).
+
 ## [Phase 3] — 2026-11-28 — Model-Agnostic Connector, Tamper-Evident Audit Trail & Enterprise VPC Bundle
 - **Model-Agnostic Provider Connector (`providers.py`, `config.example.yaml`, `orchestrator.py`, `eval.py`):** Added unified provider resolution (`CLI > env > YAML > preset`) supporting local Ollama (`qwen3:8b`, `qwen2.5-coder:7b`, `qwen3:14b`), self-hosted vLLM/TGI, and enterprise OpenAI-compatible gateways (AWS Bedrock, GCP Vertex AI, Azure OpenAI, OpenRouter) via `LLM_PROVIDER`, `LLM_BASE_URL`, `LLM_API_KEY`, `LLM_MODEL`, `LLM_TIMEOUT`, and `LLM_CONFIG`, with credential redaction (`ProviderAPIError`, `sanitize_error_message()`, URL userinfo rejection, and `eval.py` env-based secret forwarding).
 - **Tamper-Evident Compliance Audit Logger (`audit_logger.py`, `mcp_server.py`, `orchestrator.py`):** Implemented process-safe (`fcntl.flock`), SHA-256 hash-chained (`prev_hash` → `entry_hash`) JSONL audit logging covering `session_start`, `tool_call`, `security_block`, `compile_and_test`, `git_diff` (`git_diff_sha256`), and `session_end`, with automatic secret scrubbing and standalone CLI verification (`audit_logger.py --verify <path>`).

@@ -11,6 +11,7 @@ import unittest
 import yaml
 
 import audit_logger
+import demo_showcase
 import orchestrator
 import providers
 
@@ -455,6 +456,15 @@ class TestPhase3EnterprisePackaging(unittest.TestCase):
             quickstart = f.read()
         for marker in ("LLM_PROVIDER", "LLM_BASE_URL", "LLM_API_KEY", "LLM_MODEL", "audit_logger.py --verify", "network_mode: none"):
             self.assertIn(marker, quickstart)
+
+    def test_06_demo_showcase_end_to_end(self):
+        result = demo_showcase.run_demo(pace=0.0, use_color=False, live_llm=False)
+        self.assertTrue(result["act1_baseline_failed"])
+        self.assertTrue(result["act1_approved"])
+        self.assertEqual(result["act2_blocked_count"], 4)
+        self.assertTrue(result["act3_chain_verified"])
+        self.assertTrue(result["act3_tamper_detected"])
+        self.assertLess(result["elapsed_sec"], 30.0)
 
 
 if __name__ == "__main__":
