@@ -1,0 +1,55 @@
+# Enterprise Configuration Template for unix-mcp-agent-harness
+# Copy to config.yaml and set LLM_CONFIG=./config.yaml (or pass --config ./config.yaml).
+# Environment variables (LLM_PROVIDER, LLM_BASE_URL, LLM_API_KEY, LLM_MODEL, LLM_TIMEOUT)
+# always take precedence over values defined in this file.
+
+llm:
+  # Active provider: ollama | vllm | bedrock | vertex | azure | openrouter | openai | openai_compatible
+  provider: ${LLM_PROVIDER:-ollama}
+  timeout: 300
+
+  profiles:
+    # 1. Local / Air-Gapped Ollama (Mac Studio, RTX 4090 build node, or Docker sidecar)
+    ollama:
+      base_url: http://localhost:11434/v1
+      model: qwen2.5-coder:7b
+      api_key: ollama
+      supports_reasoning_effort: true
+
+    # 2. Self-Hosted vLLM / TGI inside Enterprise VPC
+    vllm:
+      base_url: http://vllm.internal.vpc:8000/v1
+      model: Qwen/Qwen2.5-Coder-32B-Instruct
+      api_key: ${LLM_API_KEY:-EMPTY}
+
+    # 3. AWS Bedrock (via Bedrock Access Gateway / LiteLLM VPC OpenAI-compatible proxy)
+    bedrock:
+      base_url: https://bedrock-gateway.internal.vpc/v1
+      model: anthropic.claude-3-5-sonnet-20241022-v2:0
+      api_key: ${LLM_API_KEY}
+
+    # 4. GCP Vertex AI (OpenAI-compatible Model Garden endpoint)
+    vertex:
+      base_url: https://us-central1-aiplatform.googleapis.com/v1beta1/projects/${GCP_PROJECT_ID}/locations/us-central1/endpoints/openapi
+      model: google/gemini-2.5-pro
+      api_key: ${LLM_API_KEY}
+
+    # 5. Azure OpenAI Service (v1 OpenAI-compatible endpoint)
+    azure:
+      base_url: https://${AZURE_OPENAI_RESOURCE}.openai.azure.com/openai/v1
+      model: gpt-4o
+      api_key: ${LLM_API_KEY}
+
+    # 6. OpenRouter (Multi-model cloud routing)
+    openrouter:
+      base_url: https://openrouter.ai/api/v1
+      model: qwen/qwen-2.5-coder-32b-instruct
+      api_key: ${LLM_API_KEY}
+
+sandbox:
+  mode: docker
+  network: none
+
+audit:
+  audit_log: /var/log/agent-sandbox/audit.jsonl
+  security_log: /var/log/agent-sandbox/security.jsonl

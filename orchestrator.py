@@ -9,7 +9,10 @@ import time
 import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from types import SimpleNamespace
-from openai import OpenAI
+from openai import OpenAI, OpenAIError
+
+import audit_logger
+import providers
 
 
 DEFAULT_SPEC = (
@@ -30,18 +33,26 @@ class MCPClient:
         workspace: str | None = None,
         sandbox: str = "host",
         security_log: str | None = None,
+        audit_log: str | None = None,
+        inherit_audit_env: bool = True,
     ):
         cmd = [sys.executable, script_path, "--sandbox", sandbox]
         if workspace:
             cmd.extend(["--workspace", workspace])
         if security_log:
             cmd.extend(["--security-log", security_log])
+        if audit_log is not None:
+            cmd.extend(["--audit-log", audit_log])
+        child_env = os.environ.copy()
+        if not inherit_audit_env and audit_log is None:
+            child_env.pop("MCP_AUDIT_LOG", None)
         self.proc = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             text=True,
             bufsize=1,
+            env=child_env,
         )
         self._id = 0
         self.rpc("initialize", {})
@@ -82,8 +93,11 @@ class MCPClient:
             self.proc.stdin.close()
         if self.proc.stdout:
             self.proc.stdout.close()
-        self.proc.terminate()
-        self.proc.wait(timeout=2)
+        try:
+            self.proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            self.proc.terminate()
+            self.proc.wait(timeout=2)
 
 
 def stream_turn(
@@ -93,6 +107,7 @@ def stream_turn(
     tools: list[dict] | None = None,
     temp: float = 0.1,
     reasoning_effort: str | None = "none",
+    secrets: tuple[str, ...] = (),
 ):
     """Stream tokens live to stdout with a 1-second ticking heartbeat and token cap."""
     t0 = time.perf_counter()
@@ -100,7 +115,7 @@ def stream_turn(
 
     def heartbeat():
         while not got_output.wait(1.0):
-            sys.stdout.write(f"\r  [Ollama thinking / building JSON... {time.perf_counter() - t0:.0f}s]")
+            sys.stdout.write(f"\r  [LLM thinking / building JSON... {time.perf_counter() - t0:.0f}s]")
             sys.stdout.flush()
 
     timer = threading.Thread(target=heartbeat, daemon=True)
@@ -155,6 +170,12 @@ def stream_turn(
                             print(f"  [Building tool call: {entry['name']}]", flush=True)
                         if tc.function.arguments:
                             entry["args"].append(tc.function.arguments)
+    except OpenAIError as exc:
+        safe_msg = providers.sanitize_error_message(
+            f"LLM API request failed ({type(exc).__name__}): {exc}",
+            secrets=secrets,
+        )
+        raise providers.ProviderAPIError(safe_msg) from None
     finally:
         got_output.set()
 
@@ -370,6 +391,8 @@ def run_critic(
     spec: str,
     agents_md: str = "",
     workspace: str | None = None,
+    reasoning_effort: str | None = "none",
+    secrets: tuple[str, ...] = (),
 ) -> tuple[bool, str]:
     """Fresh-context Critic agent that audits git diff + deterministic build/test execution."""
     diff = mcp.call_tool("git_diff", {})
@@ -404,6 +427,8 @@ def run_critic(
         ],
         tools=None,
         temp=0.0,
+        reasoning_effort=reasoning_effort,
+        secrets=secrets,
     )
     verdict = (msg.content or "").strip()
     return verdict.startswith("APPROVED:"), verdict
@@ -464,6 +489,19 @@ def extract_fallback_tool_calls(content: str | None) -> list[SimpleNamespace] | 
                 pass
     return calls or None
 
+def classify_security_block(reason: str) -> str:
+    low = (reason or "").lower()
+    if "symlink" in low:
+        return "symlink_escape"
+    if "sensitive file" in low or ".env" in low or "credential" in low:
+        return "sensitive_file"
+    if "escapes workspace" in low or "null byte" in low or "traversal" in low:
+        return "path_traversal"
+    if "command" in low or "socket" in low or "metacharacter" in low or "compile_and_test" in low:
+        return "command_injection"
+    return "security_violation"
+
+
 def execute_mcp_tool_safely(mcp: MCPClient, name: str, call_args: dict) -> tuple[bool, str]:
     """Execute an MCP tool call and convert sandbox/security rejections into safe non-fatal feedback."""
     try:
@@ -474,14 +512,14 @@ def execute_mcp_tool_safely(mcp: MCPClient, name: str, call_args: dict) -> tuple
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Local MCP Coder + Critic Autonomous Harness",
+        description="Model-Agnostic MCP Coder + Critic Autonomous Harness",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=(
             "Examples:\n"
             "  python3 orchestrator.py\n"
             "  python3 orchestrator.py --model qwen2.5-coder:7b\n"
-            "  python3 orchestrator.py --workspace /path/to/android-repo --task task.md --model qwen2.5-coder:7b\n"
-            '  python3 orchestrator.py --model qwen2.5-coder:7b "Create cache.h and cache.c implementing a thread-safe LRU cache with pthread_mutex_t, plus test_cache.c."\n'
+            "  LLM_PROVIDER=openrouter LLM_API_KEY=... LLM_MODEL=qwen/qwen-2.5-coder-32b-instruct python3 orchestrator.py\n"
+            "  python3 orchestrator.py --workspace /path/to/android-repo --task task.md --audit-log audit.jsonl\n"
         ),
     )
     parser.add_argument("spec", nargs="?", default=None, help="Engineering task specification")
@@ -494,16 +532,36 @@ def main():
     parser.add_argument(
         "--sandbox",
         choices=["host", "docker"],
-        default="host",
+        default=os.environ.get("MCP_SANDBOX", "host"),
         help="Execution backend for compile_and_test (default: host; use docker for --network=none container)",
     )
     parser.add_argument(
         "--security-log",
-        default=None,
+        default=os.environ.get("MCP_SECURITY_LOG") or None,
         help="Optional JSONL path for structured MCP security violation events",
     )
-    parser.add_argument("--model", default="qwen3:8b", help="Local Ollama model name (default: qwen3:8b)")
-    parser.add_argument("--base-url", default="http://localhost:11434/v1", help="OpenAI-compatible endpoint URL")
+    parser.add_argument(
+        "--audit-log",
+        default=os.environ.get("MCP_AUDIT_LOG", os.path.join(os.path.dirname(os.path.abspath(__file__)), "audit.jsonl")),
+        help="Path to tamper-evident hash-chained audit.jsonl compliance log (pass '' to disable)",
+    )
+    parser.add_argument(
+        "--provider",
+        default=None,
+        help="LLM provider (ollama, vllm, bedrock, vertex, azure, openrouter, openai, openai_compatible; env: LLM_PROVIDER)",
+    )
+    parser.add_argument(
+        "--config",
+        default=None,
+        help="Optional YAML provider config file (see config.example.yaml; env: LLM_CONFIG)",
+    )
+    parser.add_argument("--model", default=None, help="LLM model name (env: LLM_MODEL; default for ollama: qwen3:8b)")
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        help="OpenAI-compatible endpoint URL (env: LLM_BASE_URL; default for ollama: http://localhost:11434/v1)",
+    )
+    parser.add_argument("--api-key", default=None, help="Provider API key (env: LLM_API_KEY)")
     parser.add_argument("--max-turns", type=int, default=12, help="Maximum Coder turns before aborting")
     parser.add_argument(
         "--trajectories",
@@ -511,6 +569,15 @@ def main():
         help="Path to JSONL file for logging Critic-approved RLVR trajectories",
     )
     args = parser.parse_args()
+
+    provider_cfg = providers.resolve_provider_config(
+        provider=args.provider,
+        base_url=args.base_url,
+        api_key=args.api_key,
+        model=args.model,
+        config_path=args.config,
+    )
+    reasoning_effort = "none" if provider_cfg.supports_reasoning_effort else None
 
     spec = resolve_task_spec(args.task, args.spec)
     is_external_workspace = args.workspace is not None
@@ -529,6 +596,10 @@ def main():
     if agents_md:
         print(f"[Harness] Loaded AGENTS.md ({len(agents_md)} chars) from {workspace}", flush=True)
 
+    print(
+        f"[Harness] Provider={provider_cfg.provider} | Model={provider_cfg.model} | BaseURL={provider_cfg.base_url}",
+        flush=True,
+    )
     print(f"\n=== [Task] ===\n{spec}", flush=True)
 
     coder_system = (
@@ -542,9 +613,26 @@ def main():
     if agents_md:
         coder_system += f"\n\nTarget Repository AGENTS.md:\n{agents_md}"
 
+    audit = audit_logger.AuditLogger(args.audit_log, secrets=provider_cfg.secret_values()) if args.audit_log else None
+    if audit:
+        audit.log_session_start(
+            workspace=workspace,
+            provider=provider_cfg.provider,
+            model=provider_cfg.model,
+            base_url=provider_cfg.base_url,
+            sandbox=args.sandbox,
+            spec=spec,
+        )
+
     mcp_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "mcp_server.py")
-    client = OpenAI(base_url=args.base_url, api_key="ollama", timeout=300.0)
-    mcp = MCPClient(mcp_script, workspace=workspace, sandbox=args.sandbox, security_log=args.security_log)
+    client = providers.create_openai_client(provider_cfg)
+    mcp = MCPClient(
+        mcp_script,
+        workspace=workspace,
+        sandbox=args.sandbox,
+        security_log=args.security_log,
+        inherit_audit_env=False,
+    )
     openai_tools = mcp.get_openai_tools()
 
     initial_user = spec
@@ -558,12 +646,26 @@ def main():
         {"role": "user", "content": initial_user},
     ]
 
+    final_status = "max_turns_reached"
+    final_diff = ""
+    turns_completed = 0
+    security_blocks = 0
+    critic_rejections = 0
+
     try:
-        critic_rejections = 0
         last_call_sig = None
         for turn in range(args.max_turns):
-            print(f"\n=== [Coder Turn {turn+1} | {args.model}] ===", flush=True)
-            msg = stream_turn(client, args.model, messages, tools=openai_tools, temp=0.1)
+            turns_completed = turn + 1
+            print(f"\n=== [Coder Turn {turn+1} | {provider_cfg.model}] ===", flush=True)
+            msg = stream_turn(
+                client,
+                provider_cfg.model,
+                messages,
+                tools=openai_tools,
+                temp=0.1,
+                reasoning_effort=reasoning_effort,
+                secrets=provider_cfg.secret_values(),
+            )
             if not msg.tool_calls:
                 msg.tool_calls = extract_fallback_tool_calls(msg.content)
 
@@ -586,32 +688,80 @@ def main():
                     call_args = json.loads(tc.function.arguments)
                     print(f"  -> MCP {tc.function.name}({list(call_args.keys())})", flush=True)
                     call_sig = (tc.function.name, json.dumps(call_args, sort_keys=True))
+                    t_tool = time.perf_counter()
+                    blocked = False
                     if is_blocked_mixed_tool(turn_names, tc.function.name):
+                        blocked = True
                         out = (
                             f"BLOCKED: Do not call `{tc.function.name}` in the same turn as "
                             f"find_files/grep_search/read_file. Read the tool output first, then patch or test in the next turn."
                         )
+                        if audit:
+                            security_blocks += 1
+                            audit.log_security_block(
+                                tool=tc.function.name,
+                                target=str(call_args.get("path", "")),
+                                category="mixed_turn_policy",
+                                reason=out,
+                                turn=turns_completed,
+                            )
                     elif call_sig == last_call_sig and tc.function.name != "compile_and_test":
+                        blocked = True
                         out = (
                             f"WARNING: Duplicate consecutive call to `{tc.function.name}` with identical arguments blocked. "
                             "Use a different approach (e.g., `write_file` to write the complete corrected file or `compile_and_test` to verify)."
                         )
                     else:
                         last_call_sig = call_sig
-                        _, out = execute_mcp_tool_safely(mcp, tc.function.name, call_args)
+                        blocked, out = execute_mcp_tool_safely(mcp, tc.function.name, call_args)
+                        if blocked and audit:
+                            security_blocks += 1
+                            audit.log_security_block(
+                                tool=tc.function.name,
+                                target=str(call_args.get("path", call_args.get("pattern", ""))),
+                                category=classify_security_block(out),
+                                reason=out,
+                                turn=turns_completed,
+                            )
+                    elapsed_ms = (time.perf_counter() - t_tool) * 1000.0
+                    if audit:
+                        audit.log_tool_call(
+                            tool=tc.function.name,
+                            arguments=call_args,
+                            output=out,
+                            blocked=blocked,
+                            turn=turns_completed,
+                            elapsed_ms=elapsed_ms,
+                        )
                     if tc.function.name == "compile_and_test":
                         print("\n".join(f"     {line}" for line in out.splitlines()[:25]), flush=True)
                         if "EXIT_CODE: 0" in out:
                             messages.append({"role": "tool", "tool_call_id": tc.id, "content": out})
                             print("\n=== [Critic Review] ===", flush=True)
                             approved, feedback = run_critic(
-                                client, args.model, mcp, spec, agents_md=agents_md, workspace=workspace
+                                client,
+                                provider_cfg.model,
+                                mcp,
+                                spec,
+                                agents_md=agents_md,
+                                workspace=workspace,
+                                reasoning_effort=reasoning_effort,
+                                secrets=provider_cfg.secret_values(),
                             )
+                            if audit:
+                                audit.log_compile_and_test(
+                                    output=out,
+                                    critic_approved=approved,
+                                    critic_verdict=feedback,
+                                    turn=turns_completed,
+                                )
                             if approved:
                                 diff = mcp.call_tool("git_diff", {})
+                                final_diff = diff
+                                final_status = "approved"
                                 log_trajectory(
                                     args.trajectories,
-                                    model=args.model,
+                                    model=provider_cfg.model,
                                     workspace=workspace,
                                     spec=spec,
                                     messages=messages,
@@ -625,11 +775,14 @@ def main():
                                 return
                             critic_rejections += 1
                             if critic_rejections >= 2:
+                                final_status = "critic_rejected"
                                 print("\n=== [Harness] Critic rejection cap (2) reached — halting cleanly ===", flush=True)
                                 return
                             messages.append({"role": "user", "content": f"Critic feedback:\n{feedback}\n/no_think"})
                             break
 
+                        if audit:
+                            audit.log_compile_and_test(output=out, turn=turns_completed)
                         out += "\n\nINSTRUCTION: Fix ALL errors listed above across all files in one batch before calling compile_and_test again."
                     messages.append({"role": "tool", "tool_call_id": tc.id, "content": out})
 
@@ -660,7 +813,25 @@ def main():
                     "content": "Call `compile_and_test` now to verify your changes. /no_think",
                 })
 
+    except Exception:
+        final_status = "error"
+        raise
     finally:
+        if audit:
+            if not final_diff:
+                try:
+                    final_diff = mcp.call_tool("git_diff", {})
+                except Exception:
+                    final_diff = ""
+            touched = sorted(extract_diff_files_with_hunks(final_diff)) if final_diff else []
+            audit.log_git_diff(diff_text=final_diff, changed_files=touched, status=final_status)
+            audit.log_session_end(
+                status=final_status,
+                turns=turns_completed,
+                security_blocks=security_blocks,
+                critic_rejections=critic_rejections,
+                git_diff=final_diff,
+            )
         mcp.close()
 
 

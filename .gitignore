@@ -12,3 +12,7 @@ fused_model/
 *.gguf
 eval_results*.json
 AUDIT_PACKET.md
+audit.jsonl
+security.jsonl
+config.yaml
+deploy/logs/

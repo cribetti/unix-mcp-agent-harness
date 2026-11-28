@@ -1,0 +1,53 @@
+# Hardened Enterprise Deployment Bundle for unix-mcp-agent-harness
+# Default configuration enforces:
+#   - Non-root UID/GID 10001
+#   - Read-only root filesystem (read_only: true) + explicit tmpfs for /tmp
+#   - Read-only target workspace mount by default (use docker-compose.vpc.yml or -v ...:/workspace:rw to patch)
+#   - network_mode: none by default (zero network egress)
+#   - no-new-privileges:true and cap_drop: [ALL]
+#   - Strict CPU, memory, and PID resource ceilings
+
+services:
+  agent-sandbox:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: unix-mcp-agent-harness:enterprise
+    user: "10001:10001"
+    read_only: true
+    network_mode: none
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=256m
+      - /home/agent:rw,noexec,nosuid,nodev,size=64m
+    pids_limit: 256
+    mem_limit: 2g
+    cpus: "2.0"
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+          pids: 256
+    environment:
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434/v1}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-qwen2.5-coder:7b}
+      LLM_TIMEOUT: ${LLM_TIMEOUT:-300}
+      MCP_WORKSPACE: /workspace
+      MCP_SANDBOX: host
+      MCP_AUDIT_LOG: /var/log/agent-sandbox/audit.jsonl
+      MCP_SECURITY_LOG: /var/log/agent-sandbox/security.jsonl
+    volumes:
+      - type: bind
+        source: ${TARGET_WORKSPACE:-../workspace}
+        target: /workspace
+        read_only: true
+      - type: bind
+        source: ./logs
+        target: /var/log/agent-sandbox
+        read_only: false

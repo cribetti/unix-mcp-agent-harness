@@ -54,8 +54,11 @@ python3 orchestrator.py --model qwen2.5-coder:7b
 # Run against an existing Android/Gradle, Kotlin, or C repository (non-destructive, auto-loads AGENTS.md)
 python3 orchestrator.py --workspace /path/to/repo --task /path/to/task.md --model qwen2.5-coder:7b
 
-# Run fast offline harness & adversarial red-team security tests (24/24 passing in <7s)
-python3 -m unittest test_redteam.py test_harness.py -v
+# Run fast offline Phase 3, adversarial red-team, and harness tests (29/29 passing in ~8s)
+python3 -m unittest test_phase3.py test_redteam.py test_harness.py -v
+
+# Verify tamper-evident SHA-256 hash chain in a session's audit.jsonl
+python3 audit_logger.py --verify audit.jsonl
 
 # Export Critic-approved trajectories for Apple Silicon MLX LoRA fine-tuning
 python3 rlvr_mlx.py
@@ -92,6 +95,7 @@ Tested on a **2025 MacBook Air (24GB Unified Memory)**:
 * [x] Live token streaming, `--workspace` / `--task` flags, and `AGENTS.md` auto-loading
 * [x] Fast offline unit & security test suite (`test_harness.py`, 17/17 passing)
 * [x] **Phase 2 Adversarial Red-Team Security Suite (`test_redteam.py`, 7/7 passing) & `eval.py --security-gate`:** Verifies 100% refusal on prompt injections, symlink/dangling/chained-symlink escapes, traversal/null-byte/prefix-collision escapes, `.env`/secret isolation, shell/socket injection, and structured JSON security violation logging (`--security-log`).
+* [x] **Phase 3 Model-Agnostic Connector, Compliance Audit Trail & Enterprise VPC Bundle (`providers.py`, `audit_logger.py`, `deploy/`, `test_phase3.py`):** Supports Ollama, vLLM/TGI, Bedrock, Vertex AI, Azure OpenAI, and OpenRouter via `LLM_*` env vars / `config.example.yaml`, emits SHA-256 hash-chained `audit.jsonl` logs (`audit_logger.py --verify`), and ships hardened non-root Docker/Compose deployment manifests (`deploy/QUICKSTART.md`).
 * [x] Layer 4 RLVR trajectory logging (`trajectories.jsonl`), deterministic task generator (`generate_tasks.py`), batch harvester (`harvest_rlvr.py`), audit packet (`audit_packet.py`), and 8-bit MLX LoRA → `Q4_K_M` GGUF export (`rlvr_mlx.py`, `Modelfile.custom`)
 * [x] Held-out evaluation harness (`eval.py`) for comparing base vs. fine-tuned models
 * [x] Containerized Linux execution backend (`--sandbox docker` with `--network=none` in `mcp_server.py` / `orchestrator.py`)

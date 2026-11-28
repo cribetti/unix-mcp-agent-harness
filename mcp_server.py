@@ -7,22 +7,29 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from urllib.parse import unquote
 
+import audit_logger
 
-def resolve_config() -> tuple[str, str, str]:
+
+def resolve_config() -> tuple[str, str, str, str]:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--workspace", default=os.environ.get("MCP_WORKSPACE", "./workspace"))
     parser.add_argument("--sandbox", choices=["host", "docker"], default=os.environ.get("MCP_SANDBOX", "host"))
     parser.add_argument("--security-log", default=os.environ.get("MCP_SECURITY_LOG", ""))
+    parser.add_argument("--audit-log", default=os.environ.get("MCP_AUDIT_LOG", ""))
     args, _ = parser.parse_known_args()
     ws = os.path.realpath(os.path.abspath(args.workspace))
     os.makedirs(ws, exist_ok=True)
     security_log_path = os.path.abspath(args.security_log) if args.security_log else ""
-    return ws, args.sandbox, security_log_path
+    audit_log_path = os.path.abspath(args.audit_log) if args.audit_log else ""
+    return ws, args.sandbox, security_log_path, audit_log_path
 
 
-WORKSPACE, SANDBOX_MODE, SECURITY_LOG_PATH = resolve_config()
+WORKSPACE, SANDBOX_MODE, SECURITY_LOG_PATH, AUDIT_LOG_PATH = resolve_config()
+_AUDIT_LOGGER = audit_logger.AuditLogger(AUDIT_LOG_PATH) if AUDIT_LOG_PATH else None
+_SESSION_COUNTS = {"tool_calls": 0, "security_blocks": 0}
 
 PRUNE_DIRS = {
     ".git",
@@ -151,6 +158,9 @@ def log_security_violation(tool: str, target: str, reason: str, category: str = 
 
 def _deny(tool: str, target: str, reason: str, category: str) -> None:
     log_security_violation(tool, target, reason, category=category)
+    if _AUDIT_LOGGER is not None:
+        _SESSION_COUNTS["security_blocks"] += 1
+        _AUDIT_LOGGER.log_security_block(tool=tool, target=str(target), reason=reason, category=category)
     raise SecurityViolationError(reason, tool=tool, target=target, category=category)
 
 
@@ -826,38 +836,90 @@ def call_tool(name: str, args: dict) -> str:
 
 def main():
     """Standard MCP JSON-RPC 2.0 event loop over stdin/stdout."""
-    for raw_line in sys.stdin:
-        raw_line = raw_line.strip()
-        if not raw_line:
-            continue
-        req = json.loads(raw_line)
-        req_id = req.get("id")
-        method = req.get("method")
+    session_started = False
+    try:
+        for raw_line in sys.stdin:
+            raw_line = raw_line.strip()
+            if not raw_line:
+                continue
+            req = json.loads(raw_line)
+            req_id = req.get("id")
+            method = req.get("method")
 
-        try:
-            if method == "initialize":
-                result = {
-                    "protocolVersion": "2024-11-05",
-                    "serverInfo": {"name": "unix-sandbox-mcp", "version": "0.2.0"},
-                    "capabilities": {"tools": {}},
-                }
-            elif method == "tools/list":
-                result = {"tools": TOOLS}
-            elif method == "tools/call":
-                params = req.get("params", {})
-                text = call_tool(params["name"], params.get("arguments", {}))
-                result = {"content": [{"type": "text", "text": text}]}
-            else:
-                if req_id is None:
-                    continue
-                raise ValueError(f"Unsupported method: {method}")
+            try:
+                if method == "initialize":
+                    if _AUDIT_LOGGER is not None and not session_started:
+                        session_started = True
+                        _AUDIT_LOGGER.log_session_start(
+                            workspace=WORKSPACE,
+                            provider="mcp_stdio",
+                            model="mcp_server",
+                            base_url="stdio",
+                            sandbox=SANDBOX_MODE,
+                            spec="standalone_mcp_session",
+                        )
+                    result = {
+                        "protocolVersion": "2024-11-05",
+                        "serverInfo": {"name": "unix-sandbox-mcp", "version": "0.2.0"},
+                        "capabilities": {"tools": {}},
+                    }
+                elif method == "tools/list":
+                    result = {"tools": TOOLS}
+                elif method == "tools/call":
+                    params = req.get("params", {})
+                    t_name = params["name"]
+                    t_args = params.get("arguments", {})
+                    t0 = time.perf_counter()
+                    try:
+                        text = call_tool(t_name, t_args)
+                    except Exception as tool_exc:
+                        if _AUDIT_LOGGER is not None:
+                            _SESSION_COUNTS["tool_calls"] += 1
+                            _AUDIT_LOGGER.log_tool_call(
+                                tool=t_name,
+                                arguments=t_args if isinstance(t_args, dict) else {"raw": str(t_args)},
+                                output=str(tool_exc),
+                                blocked=True,
+                                elapsed_ms=(time.perf_counter() - t0) * 1000.0,
+                            )
+                        raise
+                    if _AUDIT_LOGGER is not None:
+                        _SESSION_COUNTS["tool_calls"] += 1
+                        _AUDIT_LOGGER.log_tool_call(
+                            tool=t_name,
+                            arguments=t_args if isinstance(t_args, dict) else {"raw": str(t_args)},
+                            output=text,
+                            blocked=False,
+                            elapsed_ms=(time.perf_counter() - t0) * 1000.0,
+                        )
+                        if t_name == "compile_and_test":
+                            _AUDIT_LOGGER.log_compile_and_test(output=text)
+                        elif t_name == "git_diff":
+                            _AUDIT_LOGGER.log_git_diff(diff_text=text, status="mcp_tool")
+                    result = {"content": [{"type": "text", "text": text}]}
+                else:
+                    if req_id is None:
+                        continue
+                    raise ValueError(f"Unsupported method: {method}")
 
-            resp = {"jsonrpc": "2.0", "id": req_id, "result": result}
-        except Exception as exc:
-            resp = {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32000, "message": str(exc)}}
+                resp = {"jsonrpc": "2.0", "id": req_id, "result": result}
+            except Exception as exc:
+                resp = {"jsonrpc": "2.0", "id": req_id, "error": {"code": -32000, "message": str(exc)}}
 
-        sys.stdout.write(json.dumps(resp) + "\n")
-        sys.stdout.flush()
+            sys.stdout.write(json.dumps(resp) + "\n")
+            sys.stdout.flush()
+    finally:
+        if _AUDIT_LOGGER is not None and session_started:
+            try:
+                final_diff = tool_git_diff()
+            except Exception:
+                final_diff = ""
+            _AUDIT_LOGGER.log_session_end(
+                status="mcp_closed",
+                turns=_SESSION_COUNTS["tool_calls"],
+                security_blocks=_SESSION_COUNTS["security_blocks"],
+                git_diff=final_diff,
+            )
 
 
 if __name__ == "__main__":

@@ -7,6 +7,8 @@ import sys
 import tempfile
 import time
 
+import providers
+
 DEFAULT_EVAL_TASKS = [
     {
         "id": "c_bounded_queue",
@@ -166,7 +168,16 @@ def main():
         "--models",
         nargs="+",
         default=["qwen2.5-coder:7b"],
-        help="One or more Ollama model names to benchmark",
+        help="One or more model names to benchmark",
+    )
+    parser.add_argument("--provider", default=None, help="LLM provider (env: LLM_PROVIDER; default: ollama)")
+    parser.add_argument("--base-url", default=None, help="OpenAI-compatible endpoint URL (env: LLM_BASE_URL)")
+    parser.add_argument("--api-key", default=None, help="Provider API key (env: LLM_API_KEY)")
+    parser.add_argument("--config", default=None, help="Optional YAML provider config file (env: LLM_CONFIG)")
+    parser.add_argument(
+        "--audit-log",
+        default="",
+        help="Optional audit.jsonl compliance log path for eval runs (disabled by default)",
     )
     parser.add_argument("--tasks-file", default=None, help="Optional JSON file of held-out tasks")
     parser.add_argument("--max-turns", type=int, default=8, help="Max Coder turns per task (default: 8)")
@@ -195,22 +206,46 @@ def main():
     with tempfile.TemporaryDirectory() as td:
         temp_traj = os.path.join(td, "eval_trajectories.jsonl")
         for model in args.models:
-            print(f"\n=== Evaluating {model} ({len(tasks)} held-out tasks) ===", flush=True)
+            provider_cfg = providers.resolve_provider_config(
+                provider=args.provider,
+                base_url=args.base_url,
+                api_key=args.api_key,
+                model=model,
+                config_path=args.config,
+            )
+            print(
+                f"\n=== Evaluating {provider_cfg.model} (provider={provider_cfg.provider}, "
+                f"base_url={provider_cfg.base_url}, {len(tasks)} held-out tasks) ===",
+                flush=True,
+            )
+            child_env = os.environ.copy()
+            child_env["LLM_PROVIDER"] = provider_cfg.provider
+            child_env["LLM_BASE_URL"] = provider_cfg.base_url
+            child_env["LLM_API_KEY"] = provider_cfg.api_key
+            child_env["LLM_MODEL"] = provider_cfg.model
             runs = []
             for idx, task in enumerate(tasks, 1):
                 t0 = time.perf_counter()
                 cmd = [
                     sys.executable,
                     orchestrator_script,
+                    "--provider",
+                    provider_cfg.provider,
+                    "--base-url",
+                    provider_cfg.base_url,
                     "--model",
-                    model,
+                    provider_cfg.model,
                     "--max-turns",
                     str(args.max_turns),
                     "--trajectories",
                     temp_traj,
+                    "--audit-log",
+                    args.audit_log,
                     "--task",
                     task["spec"],
                 ]
+                if args.config:
+                    cmd.extend(["--config", args.config])
                 task_ws_cm = None
                 if task.get("workspace_files"):
                     task_ws_cm = tempfile.TemporaryDirectory()
@@ -223,6 +258,7 @@ def main():
                         capture_output=True,
                         text=True,
                         timeout=args.timeout,
+                        env=child_env,
                     )
                     passed, turns = parse_orchestrator_output(res.stdout)
                     timed_out = False
