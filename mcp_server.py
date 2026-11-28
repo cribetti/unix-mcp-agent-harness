@@ -1,4 +1,5 @@
 import argparse
+from datetime import datetime, timezone
 import fnmatch
 import json
 import os
@@ -6,19 +7,22 @@ import re
 import shutil
 import subprocess
 import sys
+from urllib.parse import unquote
 
 
-def resolve_config() -> tuple[str, str]:
+def resolve_config() -> tuple[str, str, str]:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--workspace", default=os.environ.get("MCP_WORKSPACE", "./workspace"))
     parser.add_argument("--sandbox", choices=["host", "docker"], default=os.environ.get("MCP_SANDBOX", "host"))
+    parser.add_argument("--security-log", default=os.environ.get("MCP_SECURITY_LOG", ""))
     args, _ = parser.parse_known_args()
     ws = os.path.realpath(os.path.abspath(args.workspace))
     os.makedirs(ws, exist_ok=True)
-    return ws, args.sandbox
+    security_log_path = os.path.abspath(args.security_log) if args.security_log else ""
+    return ws, args.sandbox, security_log_path
 
 
-WORKSPACE, SANDBOX_MODE = resolve_config()
+WORKSPACE, SANDBOX_MODE, SECURITY_LOG_PATH = resolve_config()
 
 PRUNE_DIRS = {
     ".git",
@@ -31,20 +35,221 @@ PRUNE_DIRS = {
     "node_modules",
 }
 
+SENSITIVE_DIRS = {".git", ".ssh", ".aws", ".gnupg"}
+
+SENSITIVE_EXACT_NAMES = {
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    ".dockercfg",
+    "id_rsa",
+    "id_rsa.pub",
+    "id_ed25519",
+    "id_ed25519.pub",
+    "id_ecdsa",
+    "id_dsa",
+    "authorized_keys",
+    "known_hosts",
+    "credentials",
+    "credentials.json",
+    "credentials.yml",
+    "credentials.yaml",
+    "credentials.ini",
+    "credentials.xml",
+    "aws_credentials",
+    "secrets.json",
+    "secrets.yaml",
+    "secrets.yml",
+    "secrets.properties",
+    "secrets.toml",
+    "secrets.env",
+    "keystore.properties",
+    "service-account.json",
+    "service_account.json",
+    "token.json",
+    "auth.json",
+    "master.key",
+}
+
+SENSITIVE_EXTENSIONS = {
+    ".pem",
+    ".key",
+    ".p12",
+    ".pfx",
+    ".jks",
+    ".keystore",
+    ".kdbx",
+    ".secret",
+    ".secrets",
+}
+
+SENSITIVE_NAME_PATTERNS = (
+    "*credentials*.json",
+    "*credentials*.yaml",
+    "*credentials*.yml",
+    "*service*account*.json",
+)
+
+DANGEROUS_COMMAND_PATTERNS = (
+    (r"\brm\s+-[a-zA-Z]*[rf][a-zA-Z]*\b", "destructive rm"),
+    (r"\bgit\s+push\s+(?:--force|-f)\b", "destructive git push --force"),
+    (r"\b(?:curl|wget|nc|ncat|netcat|socat|telnet|scp|sftp|rsync)\b", "unauthorized network binary"),
+    (r"/dev/(?:tcp|udp)/", "network device redirection"),
+    (r"\|\s*(?:ba)?sh\b", "piped shell execution"),
+    (r"\b(?:ba)?sh\s+-c\b", "nested shell command"),
+    (r"\b(?:python[23]?\s+-c|perl\s+-e|mkfifo|base64\s+(?:-d|--decode))\b", "unauthorized shell/payload command"),
+    (r":\(\)\s*\{", "fork bomb"),
+)
+
+SOCKET_EGRESS_PATTERNS = (
+    (r"\bsocket\s*\(\s*AF_INET6?\b", "raw IPv4/IPv6 socket"),
+    (r"\bjava\.net\.(?:Socket|ServerSocket|HttpURLConnection|URL)\b", "Java network socket/URL"),
+    (r"\bHttpURLConnection\b", "HTTP network connection"),
+)
+
 TEXT_EXTENSIONS = {
     ".kt", ".kts", ".java", ".c", ".cpp", ".cc", ".h", ".hpp",
     ".xml", ".gradle", ".properties", ".json", ".toml", ".md", ".txt", ".sh",
 }
 
 
-def safe_path(rel_path: str) -> str:
-    """Enforce strict path-jail security (including leaf symlink resolution) inside WORKSPACE."""
+class SecurityViolationError(ValueError):
+    """Structured security violation raised when an MCP tool call breaches sandbox policy."""
+
+    def __init__(self, message: str, *, tool: str = "", target: str = "", category: str = "security_violation"):
+        super().__init__(message)
+        self.tool = tool
+        self.target = target
+        self.reason = message
+        self.category = category
+
+
+def log_security_violation(tool: str, target: str, reason: str, category: str = "security_violation") -> dict:
+    """Emit a structured JSON security violation event to stderr and optional SECURITY_LOG_PATH."""
+    event = {
+        "event_type": "security_violation",
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "tool": tool,
+        "target": str(target),
+        "reason": reason,
+        "category": category,
+        "workspace": WORKSPACE,
+        "sandbox": SANDBOX_MODE,
+    }
+    line = json.dumps(event, ensure_ascii=False) + "\n"
+    if SECURITY_LOG_PATH:
+        parent = os.path.dirname(SECURITY_LOG_PATH)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(SECURITY_LOG_PATH, "a", encoding="utf-8") as f:
+            f.write(line)
+            f.flush()
+    sys.stderr.write(line)
+    sys.stderr.flush()
+    return event
+
+
+def _deny(tool: str, target: str, reason: str, category: str) -> None:
+    log_security_violation(tool, target, reason, category=category)
+    raise SecurityViolationError(reason, tool=tool, target=target, category=category)
+
+
+def is_sensitive_path(rel_path: str) -> tuple[bool, str]:
+    """Check whether a workspace-relative path targets blocked secret/credential directories or files."""
+    if not rel_path or rel_path == ".":
+        return False, ""
+    norm = rel_path.replace("\\", "/")
+    while norm.startswith("./"):
+        norm = norm[2:]
+    norm = norm.lstrip("/")
+    if not norm:
+        return False, ""
+    parts = [p.lower() for p in norm.split("/") if p and p != "."]
+    if not parts:
+        return False, ""
+    for part in parts:
+        if part in SENSITIVE_DIRS:
+            return True, f"blocked directory '{part}'"
+    base = parts[-1]
+    if base == ".env" or base.startswith(".env."):
+        return True, "environment secret file"
+    if base in SENSITIVE_EXACT_NAMES:
+        return True, f"credential/secret file '{base}'"
+    _, ext = os.path.splitext(base)
+    if ext in SENSITIVE_EXTENSIONS:
+        return True, f"private key/keystore extension '{ext}'"
+    for pat in SENSITIVE_NAME_PATTERNS:
+        if fnmatch.fnmatch(base, pat):
+            return True, f"credential file matching '{pat}'"
+    return False, ""
+
+
+def safe_path(rel_path: str, *, tool: str = "safe_path") -> str:
+    """Enforce strict path-jail security (including traversal, URL encoding, symlinks, and secrets) inside WORKSPACE."""
     if not rel_path or rel_path == ".":
         return WORKSPACE
+    if "\x00" in rel_path or "%00" in rel_path.lower():
+        _deny(tool, rel_path, f"Access denied: '{rel_path}' contains null byte and escapes workspace", "path_traversal")
+
+    decoded = rel_path
+    for _ in range(3):
+        nxt = unquote(decoded)
+        if nxt == decoded:
+            break
+        decoded = nxt
+    if "\x00" in decoded:
+        _deny(
+            tool,
+            rel_path,
+            f"Access denied: '{rel_path}' contains URL-encoded null byte and escapes workspace",
+            "path_traversal",
+        )
+    if decoded != rel_path:
+        decoded_norm = decoded.replace("\\", "/")
+        if decoded_norm.startswith(("/", "~")) or ".." in decoded_norm.split("/"):
+            _deny(
+                tool,
+                rel_path,
+                f"Access denied: URL-encoded path '{rel_path}' escapes workspace",
+                "path_traversal",
+            )
+        dec_target = os.path.realpath(os.path.abspath(os.path.join(WORKSPACE, os.path.expanduser(decoded_norm))))
+        if os.path.commonpath([WORKSPACE, dec_target]) != WORKSPACE:
+            _deny(
+                tool,
+                rel_path,
+                f"Access denied: URL-encoded path '{rel_path}' escapes workspace",
+                "path_traversal",
+            )
+        dec_rel = os.path.relpath(dec_target, WORKSPACE)
+        is_sens, detail = is_sensitive_path(dec_rel)
+        if is_sens:
+            _deny(
+                tool,
+                rel_path,
+                f"Access denied: URL-encoded path '{rel_path}' blocked by sensitive file policy ({detail})",
+                "sensitive_file",
+            )
+
+    if rel_path.startswith("~"):
+        _deny(tool, rel_path, f"Access denied: '{rel_path}' home-relative path escapes workspace", "path_traversal")
+
     candidate = os.path.abspath(os.path.join(WORKSPACE, rel_path))
     target = os.path.realpath(candidate)
     if os.path.commonpath([WORKSPACE, target]) != WORKSPACE:
-        raise ValueError(f"Access denied: '{rel_path}' escapes workspace")
+        if os.path.commonpath([WORKSPACE, candidate]) == WORKSPACE:
+            _deny(tool, rel_path, f"Access denied: '{rel_path}' symlink escapes workspace", "symlink_escape")
+        _deny(tool, rel_path, f"Access denied: '{rel_path}' escapes workspace", "path_traversal")
+
+    for check_path in (os.path.relpath(target, WORKSPACE), os.path.relpath(candidate, WORKSPACE)):
+        is_sens, detail = is_sensitive_path(check_path)
+        if is_sens:
+            _deny(
+                tool,
+                rel_path,
+                f"Access denied: '{rel_path}' is blocked by sensitive file policy ({detail})",
+                "sensitive_file",
+            )
     return target
 
 
@@ -61,6 +266,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "pattern": {"type": "string", "description": "Filename or path glob pattern (default '*')"},
+                "path": {"type": "string", "description": "Relative subdirectory to search (default '.')"},
                 "max_results": {"type": "integer", "description": "Max files to return (default 100)"},
             },
         },
@@ -130,19 +336,44 @@ TOOLS = [
 
 
 def _iter_workspace_files(root_dir: str):
+    skip_dirs = PRUNE_DIRS | SENSITIVE_DIRS
     for dirpath, dirnames, filenames in os.walk(root_dir):
-        dirnames[:] = sorted(d for d in dirnames if d not in PRUNE_DIRS)
+        dirnames[:] = sorted(d for d in dirnames if d not in skip_dirs)
         for fname in sorted(filenames):
             full = os.path.join(dirpath, fname)
+            real = os.path.realpath(full)
+            if os.path.commonpath([WORKSPACE, real]) != WORKSPACE:
+                continue
             rel = os.path.relpath(full, WORKSPACE)
+            real_rel = os.path.relpath(real, WORKSPACE)
+            if is_sensitive_path(rel)[0] or is_sensitive_path(real_rel)[0]:
+                continue
             yield rel, full
 
 
 def tool_find_files(args: dict) -> str:
     pattern = (args.get("pattern") or "*").strip()
+    rel_sub = args.get("path") or "."
+    search_root = safe_path(rel_sub, tool="find_files")
+    if not os.path.exists(search_root):
+        return f"ERROR: Path '{rel_sub}' does not exist."
     max_results = int(args.get("max_results") or 100)
     patterns = [p for p in re.split(r"[\s,]+", pattern) if p] or ["*"]
-    all_rels = [rel for rel, _ in _iter_workspace_files(WORKSPACE)]
+    for pat in patterns:
+        probe = re.sub(r"[*?\[\]]", "x", pat)
+        safe_path(probe, tool="find_files")
+        stripped = pat.strip().rstrip("*?/")
+        if stripped:
+            is_sens, detail = is_sensitive_path(stripped)
+            if is_sens:
+                _deny(
+                    "find_files",
+                    pat,
+                    f"Access denied: pattern '{pat}' targets sensitive files ({detail})",
+                    "sensitive_file",
+                )
+
+    all_rels = [rel for rel, _ in _iter_workspace_files(search_root)]
     matches = []
     for rel in all_rels:
         fname = os.path.basename(rel)
@@ -163,16 +394,23 @@ def tool_grep_search(args: dict) -> str:
     query = args["query"]
     rel_sub = args.get("path") or "."
     max_results = int(args.get("max_results") or 60)
-    search_root = safe_path(rel_sub)
+    search_root = safe_path(rel_sub, tool="grep_search")
 
     if not os.path.exists(search_root):
         return f"ERROR: Path '{rel_sub}' does not exist."
 
     if shutil.which("rg"):
         cmd = ["rg", "-n", "--no-heading", "--color", "never", "-m", str(max_results)]
-        for pdir in PRUNE_DIRS:
+        for pdir in sorted(PRUNE_DIRS | SENSITIVE_DIRS):
             cmd.extend(["-g", f"!{pdir}/**", "-g", f"!{pdir}"])
-        cmd.extend([query, search_root])
+        for sglob in (
+            ".env", ".env.*", "*.pem", "*.key", "*.p12", "*.pfx", "*.jks", "*.keystore",
+            "*.kdbx", "credentials.*", "secrets.*", "id_rsa*", "id_ed25519*",
+            "service-account.json", "service_account.json", "keystore.properties",
+            ".netrc", ".npmrc",
+        ):
+            cmd.extend(["-g", f"!{sglob}", "-g", f"!**/{sglob}"])
+        cmd.extend(["--", query, search_root])
         res = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
         if res.returncode not in (0, 1):
             return f"ERROR: rg failed: {res.stderr.strip()}"
@@ -182,6 +420,10 @@ def tool_grep_search(args: dict) -> str:
                 line = line[len(WORKSPACE) + 1 :]
             elif line == WORKSPACE:
                 line = "."
+            if ":" in line:
+                cand_path = line.split(":", 1)[0]
+                if not cand_path.isdigit() and is_sensitive_path(cand_path)[0]:
+                    continue
             if len(line) > 240:
                 line = line[:240] + "..."
             out_lines.append(line)
@@ -220,7 +462,7 @@ def tool_grep_search(args: dict) -> str:
 
 
 def tool_read_file(args: dict) -> str:
-    p = safe_path(args["path"])
+    p = safe_path(args["path"], tool="read_file")
     if not os.path.exists(p):
         return f"ERROR: {args['path']} does not exist"
     if os.path.isdir(p):
@@ -286,7 +528,7 @@ def _try_unique_indent_edit(content: str, old_str: str, new_str: str) -> tuple[s
 
 
 def tool_edit_file(args: dict) -> str:
-    p = safe_path(args["path"])
+    p = safe_path(args["path"], tool="edit_file")
     if not os.path.exists(p):
         return f"ERROR: {args['path']} does not exist. Use write_file to create new files."
 
@@ -338,7 +580,7 @@ def tool_edit_file(args: dict) -> str:
 
 
 def tool_write_file(args: dict) -> str:
-    p = safe_path(args["path"])
+    p = safe_path(args["path"], tool="write_file")
     os.makedirs(os.path.dirname(p), exist_ok=True)
     content = args["content"]
     if p.endswith(".kt"):
@@ -429,7 +671,94 @@ def build_test_command(
     return ["bash", "-c", cmd], timeout_sec
 
 
-def tool_compile_and_test() -> str:
+def validate_compile_workspace(workspace: str) -> None:
+    """Reject poisoned filenames or malicious shell/network commands before compile_and_test execution."""
+    for fname in sorted(os.listdir(workspace)):
+        if re.search(r"[;&|`$\n\r<>]", fname):
+            _deny(
+                "compile_and_test",
+                fname,
+                f"Access denied: unsafe filename '{fname}' contains shell metacharacters",
+                "command_injection",
+            )
+        _, ext = os.path.splitext(fname)
+        if ext.lower() in {".c", ".cpp", ".cc", ".kt", ".kts"} and fname.startswith(("-", "@")):
+            _deny(
+                "compile_and_test",
+                fname,
+                f"Access denied: unsafe compiler flag/response filename '{fname}'",
+                "command_injection",
+            )
+
+    for build_file in ("gradlew", "CMakeLists.txt"):
+        fpath = os.path.join(workspace, build_file)
+        if not os.path.isfile(fpath):
+            continue
+        try:
+            with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                text = f.read()
+        except OSError:
+            continue
+        for pat, label in DANGEROUS_COMMAND_PATTERNS:
+            if re.search(pat, text, re.IGNORECASE):
+                _deny(
+                    "compile_and_test",
+                    build_file,
+                    f"Access denied: malicious command pattern ({label}) detected in {build_file}",
+                    "command_injection",
+                )
+        if build_file == "CMakeLists.txt" and re.search(
+            r"execute_process\s*\(.*?(?:bash|sh\s+-c|curl|wget|nc\b|ncat|netcat|rm\s+-|/dev/(?:tcp|udp)/|python[23]?\s+-c)",
+            text,
+            re.IGNORECASE | re.DOTALL,
+        ):
+            _deny(
+                "compile_and_test",
+                build_file,
+                "Access denied: malicious execute_process command detected in CMakeLists.txt",
+                "command_injection",
+            )
+
+    exec_markers = ("system(", "popen(", "Runtime.getRuntime().exec", "ProcessBuilder")
+    for fname in sorted(os.listdir(workspace)):
+        if os.path.splitext(fname)[1].lower() not in {".c", ".cpp", ".cc", ".kt"}:
+            continue
+        fpath = os.path.join(workspace, fname)
+        if not os.path.isfile(fpath):
+            continue
+        try:
+            with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                src = f.read()
+        except OSError:
+            continue
+        for pat, label in SOCKET_EGRESS_PATTERNS:
+            if re.search(pat, src):
+                _deny(
+                    "compile_and_test",
+                    fname,
+                    f"Access denied: unauthorized network socket pattern ({label}) detected in {fname}",
+                    "command_injection",
+                )
+        if any(marker in src for marker in exec_markers):
+            for pat, label in DANGEROUS_COMMAND_PATTERNS:
+                if re.search(pat, src, re.IGNORECASE):
+                    _deny(
+                        "compile_and_test",
+                        fname,
+                        f"Access denied: malicious command execution ({label}) detected in {fname}",
+                        "command_injection",
+                    )
+
+
+def tool_compile_and_test(args: dict | None = None) -> str:
+    if args:
+        _deny(
+            "compile_and_test",
+            json.dumps(args, sort_keys=True),
+            f"Access denied: compile_and_test does not accept arguments or shell commands ({sorted(args.keys())})",
+            "command_injection",
+        )
+    validate_compile_workspace(WORKSPACE)
     if SANDBOX_MODE == "docker" and not shutil.which("docker"):
         return "EXIT_CODE: 1\nSTDOUT:\n\nSTDERR:\nERROR: --sandbox docker requested, but 'docker' CLI was not found on PATH."
 
@@ -489,10 +818,10 @@ def call_tool(name: str, args: dict) -> str:
     if name == "write_file":
         return tool_write_file(args)
     if name == "compile_and_test":
-        return tool_compile_and_test()
+        return tool_compile_and_test(args)
     if name == "git_diff":
         return tool_git_diff()
-    raise ValueError(f"Unknown tool: {name}")
+    _deny(name, str(args), f"Unknown tool: {name}", "unknown_tool")
 
 
 def main():

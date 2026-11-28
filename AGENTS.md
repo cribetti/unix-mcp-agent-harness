@@ -39,10 +39,12 @@ All filesystem tools in `mcp_server.py` are strictly confined to `WORKSPACE`:
 
 - **Workspace Resolution (`resolve_workspace`):** Reads `--workspace <path>` (or `MCP_WORKSPACE` env var, defaulting to `./workspace`) and canonicalizes it via `os.path.realpath(os.path.abspath(...))`.
 - **Symlink-Safe Path Jail (`safe_path`):**
-  - Resolves the full candidate path via `os.path.realpath(candidate)` (covering both parent directories and leaf symlinks, while supporting non-existent target files for `write_file`).
-  - Enforces `os.path.commonpath([WORKSPACE, target]) == WORKSPACE`.
-  - Any `../` traversal or symlink pointing outside `WORKSPACE` raises `ValueError("Access denied: '...' escapes workspace")`.
-- **Directory Pruning (`PRUNE_DIRS`):** `find_files` and `grep_search` skip `.git`, `.gradle`, `build`, `.idea`, `.cxx`, `captures`, `__pycache__`, and `node_modules`.
+  - Resolves the full candidate path via `os.path.realpath(candidate)` (covering both parent directories, chained/dangling symlinks, and leaf symlinks, while supporting non-existent target files for `write_file`).
+  - Blocks null bytes (`\x00` / `%00`), URL/double-URL-encoded traversal, home-relative (`~`) paths, prefix-collision sibling paths, and sensitive files/directories (`is_sensitive_path()`: `.env*`, `.git`, `.ssh`, `.aws`, `.gnupg`, credentials, keystores, `.pem`/`.key`/`.p12`/`.jks`).
+  - Enforces `os.path.commonpath([WORKSPACE, target]) == WORKSPACE` across `read_file`, `write_file`, `edit_file`, `find_files`, and `grep_search`.
+  - Any breach emits a structured JSON `security_violation` event (`stderr` + optional `--security-log` / `MCP_SECURITY_LOG`) and raises `SecurityViolationError` (`ValueError`).
+- **Build/Socket Guard (`validate_compile_workspace`):** `compile_and_test` rejects arguments, shell-metacharacter/flag filenames, poisoned `gradlew`/`CMakeLists.txt`, and raw socket/network egress calls (`SOCKET_EGRESS_PATTERNS`).
+- **Directory Pruning (`PRUNE_DIRS`):** `find_files` and `grep_search` skip `.git`, `.gradle`, `build`, `.idea`, `.cxx`, `captures`, `__pycache__`, and `node_modules` (plus `SENSITIVE_DIRS` and secret globs).
 - **Kotlin Sanitization (`sanitize_kotlin`):** `write_file` and `edit_file` strip `import kotlin.test.*` lines from `.kt` files so standalone `kotlinc` + `assert(condition)` runs without missing-test-dependency errors.
 
 ## 3. MCP Tool Schemas (`mcp_server.py`)
@@ -62,8 +64,8 @@ All filesystem tools in `mcp_server.py` are strictly confined to `WORKSPACE`:
 Run from the `unix-mcp-agent-harness/` directory (using the parent `../.venv` Python environment):
 
 ```bash
-# 1. Fast unit & MCP stdio test suite (includes py_compile, initialize, tools/list, path-jail, and AGENTS.md)
-../.venv/bin/python -m unittest test_harness.py -v
+# 1. Fast unit & adversarial red-team security suites (py_compile, initialize, path-jail, symlinks, secrets, command/socket injection, security logging)
+../.venv/bin/python -m unittest test_redteam.py test_harness.py -v
 
 # 2. CLI flags check
 ../.venv/bin/python orchestrator.py --help

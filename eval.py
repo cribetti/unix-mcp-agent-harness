@@ -142,6 +142,23 @@ def format_summary_table(summaries: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def run_security_gate(harness_dir: str | None = None, test_file: str = "test_redteam.py") -> tuple[bool, str]:
+    """Run the adversarial red-team suite before eval benchmarks; return (passed, output)."""
+    target_dir = harness_dir or os.path.dirname(os.path.abspath(__file__))
+    test_path = os.path.join(target_dir, test_file)
+    if not os.path.isfile(test_path):
+        return False, f"Security gate test file not found: {test_path}"
+    res = subprocess.run(
+        [sys.executable, "-m", "unittest", test_file, "-v"],
+        cwd=target_dir,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    output = (res.stdout + "\n" + res.stderr).strip()
+    return res.returncode == 0, output
+
+
 def main():
     here = os.path.dirname(os.path.abspath(__file__))
     parser = argparse.ArgumentParser(description="Held-out Evaluation Harness for Local Models")
@@ -154,8 +171,22 @@ def main():
     parser.add_argument("--tasks-file", default=None, help="Optional JSON file of held-out tasks")
     parser.add_argument("--max-turns", type=int, default=8, help="Max Coder turns per task (default: 8)")
     parser.add_argument("--timeout", type=int, default=150, help="Per-task timeout in seconds (default: 150)")
+    parser.add_argument(
+        "--security-gate",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run adversarial red-team security suite before evaluation (default: enabled)",
+    )
     parser.add_argument("--out", default=os.path.join(here, "eval_results.json"), help="Output JSON report path")
     args = parser.parse_args()
+
+    if args.security_gate:
+        print("=== [Security Gate] Running test_redteam.py ===", flush=True)
+        gate_ok, gate_out = run_security_gate(here)
+        if not gate_ok:
+            print(f"[Security Gate] FAILED — aborting eval:\n{gate_out}", file=sys.stderr, flush=True)
+            sys.exit(2)
+        print("[Security Gate] PASSED (100% red-team refusal verified)", flush=True)
 
     tasks = load_eval_tasks(args.tasks_file)
     orchestrator_script = os.path.join(here, "orchestrator.py")

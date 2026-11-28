@@ -54,8 +54,8 @@ python3 orchestrator.py --model qwen2.5-coder:7b
 # Run against an existing Android/Gradle, Kotlin, or C repository (non-destructive, auto-loads AGENTS.md)
 python3 orchestrator.py --workspace /path/to/repo --task /path/to/task.md --model qwen2.5-coder:7b
 
-# Run fast offline harness & security tests
-python3 -m unittest test_harness.py -v
+# Run fast offline harness & adversarial red-team security tests (24/24 passing in <7s)
+python3 -m unittest test_redteam.py test_harness.py -v
 
 # Export Critic-approved trajectories for Apple Silicon MLX LoRA fine-tuning
 python3 rlvr_mlx.py
@@ -67,9 +67,16 @@ python3 rlvr_mlx.py --train --fuse --export-gguf ./custom-qwen-7b-q4_k_m.gguf --
 python3 generate_tasks.py --count 120 --seed 42 --out generated_tasks.json --eval-out generated_eval_tasks.json --eval-count 20
 python3 harvest_rlvr.py --tasks-file generated_tasks.json --limit 20 --model qwen2.5-coder:7b
 
-# Benchmark models on the held-out evaluation suite
+# Benchmark models on the held-out evaluation suite (auto-runs test_redteam.py --security-gate first)
 python3 eval.py --models qwen2.5-coder:7b custom-qwen
 ```
+
+## Adversarial Red-Team Security Controls (`test_redteam.py`)
+Every release and `eval.py` benchmark run is gated by `test_redteam.py` against a live `mcp_server.py` JSON-RPC 2.0 subprocess:
+* **Path-Jail & Edge-Case Isolation:** Blocks `../`, URL/double-URL-encoded traversal (`%2e%2e%2f`, `%252e%252e%252f`), null-byte injections (`\x00` / `%00`), absolute/`~` paths, prefix-collision paths (`/tmp/sandbox_evil` vs `/tmp/sandbox`), and symlink/dangling/chained-symlink escapes across all filesystem tools (`read_file`, `write_file`, `edit_file`, `find_files`, `grep_search`).
+* **Secret & Credential Exclusion:** Blocks `.env`, `.env.*`, `.git/*`, `.ssh/*`, `.aws/*`, `credentials.*`, `service_account.json`, `keystore.properties`, and private key extensions (`.pem`, `.key`, `.p12`, `.jks`, etc.)—including internal symlinks pointing to secrets.
+* **Shell Injection & Socket Containment:** Rejects unexpected `compile_and_test` args, metacharacter/flag filenames, poisoned `gradlew`/`CMakeLists.txt` (`curl`, `wget`, `rm -rf`, `execute_process`, `/dev/tcp/`), raw C/Kotlin socket egress (`socket(AF_INET)`, `java.net.Socket`), and `rg` flag injection (`--`).
+* **Prompt-Injection Defense & Structured Security Logging:** `orchestrator.py` converts sandbox denials into non-fatal `SECURITY_BLOCKED` responses and logs every attack as structured JSON (`timestamp`, `tool`, `target`, `reason`, `category`, `workspace`, `sandbox`) to `stderr` and `--security-log`.
 
 ## Hardware, Memory & RLVR Benchmark Telemetry (Apple Silicon)
 Tested on a **2025 MacBook Air (24GB Unified Memory)**:
@@ -84,6 +91,7 @@ Tested on a **2025 MacBook Air (24GB Unified Memory)**:
 * [x] Fresh-context Critic agent auditing `git diff` + deterministic diff/JUnit XML pre-checks (`orchestrator.py`)
 * [x] Live token streaming, `--workspace` / `--task` flags, and `AGENTS.md` auto-loading
 * [x] Fast offline unit & security test suite (`test_harness.py`, 17/17 passing)
+* [x] **Phase 2 Adversarial Red-Team Security Suite (`test_redteam.py`, 7/7 passing) & `eval.py --security-gate`:** Verifies 100% refusal on prompt injections, symlink/dangling/chained-symlink escapes, traversal/null-byte/prefix-collision escapes, `.env`/secret isolation, shell/socket injection, and structured JSON security violation logging (`--security-log`).
 * [x] Layer 4 RLVR trajectory logging (`trajectories.jsonl`), deterministic task generator (`generate_tasks.py`), batch harvester (`harvest_rlvr.py`), audit packet (`audit_packet.py`), and 8-bit MLX LoRA → `Q4_K_M` GGUF export (`rlvr_mlx.py`, `Modelfile.custom`)
 * [x] Held-out evaluation harness (`eval.py`) for comparing base vs. fine-tuned models
 * [x] Containerized Linux execution backend (`--sandbox docker` with `--network=none` in `mcp_server.py` / `orchestrator.py`)

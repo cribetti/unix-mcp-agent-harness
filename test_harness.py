@@ -432,6 +432,19 @@ class TestHarness(unittest.TestCase):
         self.assertIn("1/2 (50.0%)", table)
         self.assertEqual(len(eval_harness.load_eval_tasks(None)), 6)
 
+        with tempfile.TemporaryDirectory() as td:
+            pass_test = os.path.join(td, "test_gate_ok.py")
+            fail_test = os.path.join(td, "test_gate_fail.py")
+            with open(pass_test, "w", encoding="utf-8") as f:
+                f.write("import unittest\nclass T(unittest.TestCase):\n    def test_ok(self): self.assertTrue(True)\n")
+            with open(fail_test, "w", encoding="utf-8") as f:
+                f.write("import unittest\nclass T(unittest.TestCase):\n    def test_fail(self): self.fail('boom')\n")
+            ok, out_ok = eval_harness.run_security_gate(td, test_file="test_gate_ok.py")
+            self.assertTrue(ok, out_ok)
+            bad, out_bad = eval_harness.run_security_gate(td, test_file="test_gate_fail.py")
+            self.assertFalse(bad)
+            self.assertIn("boom", out_bad)
+
     def test_mcp_docker_sandbox_command_builder(self):
         with tempfile.TemporaryDirectory() as td:
             with open(os.path.join(td, "main.c"), "w", encoding="utf-8") as f:
